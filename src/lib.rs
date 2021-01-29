@@ -33,49 +33,54 @@ use num_traits::{
 pub trait PolyTraits {
     type Coeff;
     type EvalInfo;
+    type SparseInterpInfo;
 
-    fn slice_mul<'a,'b,'c>(out: &'a mut [Self::Coeff], lhs: &'b [Self::Coeff], rhs: &'c [Self::Coeff]);
+    fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]);
 
     fn mp_eval_prep<'a>(pts: impl Iterator<Item=&'a Self::Coeff>) -> Self::EvalInfo
     where Self::Coeff: 'a;
 
-    fn mp_eval_slice<'a,'b,'c>(out: &'a mut Vec<Self::Coeff>,
-                               coeffs: &'b [Self::Coeff], info: &'c Self::EvalInfo)
-    where Self::Coeff: Zero +
-            for<'d> MulAssign<&'d Self::Coeff> +
-            for<'d> AddAssign<&'d Self::Coeff>,
-    ;
+    fn mp_eval_slice(out: &mut Vec<Self::Coeff>, coeffs: &[Self::Coeff], info: &Self::EvalInfo);
+
+    fn sparse_interp_prep(theta: &Self::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
+        -> Self::SparseInterpInfo;
 }
 
 #[derive(Debug,Default,PartialEq,Eq)]
 pub struct ClassicalTraits<C>(PhantomData<C>);
 
 impl<C> PolyTraits for ClassicalTraits<C>
-where C: Clone + AddAssign,
+where C: Clone + Zero + One + AddAssign + for<'a> MulAssign<&'a C> + for<'a> AddAssign<&'a C>,
       for<'a> &'a C: Mul<Output=C>,
 {
     type Coeff = C;
     type EvalInfo = Vec<C>;
+    type SparseInterpInfo = (usize, Vec<(usize, C)>);
 
     #[inline(always)]
-    fn slice_mul<'a,'b,'c>(out: &'a mut [Self::Coeff], lhs: &'b [Self::Coeff], rhs: &'c [Self::Coeff]) {
+    fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]) {
         classical_slice_mul(out, lhs, rhs);
     }
 
+    #[inline]
     fn mp_eval_prep<'a>(pts: impl Iterator<Item=&'a Self::Coeff>) -> Self::EvalInfo
     where Self::Coeff: 'a
     {
         pts.map(Clone::clone).collect()
     }
 
-    fn mp_eval_slice<'a,'b,'c>(out: &'a mut Vec<Self::Coeff>,
-                               coeffs: &'b [Self::Coeff], info: &'c Self::EvalInfo)
-    where Self::Coeff: Zero +
-            for<'d> MulAssign<&'d Self::Coeff> +
-            for<'d> AddAssign<&'d Self::Coeff>,
+    fn mp_eval_slice(out: &mut Vec<Self::Coeff>, coeffs: &[Self::Coeff], info: &Self::EvalInfo)
     {
         out.clear();
         out.extend(info.iter().map(|x| horner_slice(coeffs, x)));
+    }
+
+    fn sparse_interp_prep(theta: &Self::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
+        -> Self::SparseInterpInfo
+    {
+        let theta_pows: Vec<_> = expons.map(|d| (d, refpow(theta, d))).collect();
+        assert!(sparsity <= theta_pows.len());
+        (sparsity, theta_pows)
     }
 }
 
@@ -100,7 +105,7 @@ impl<T,U> Poly<T,U> {
 impl<T,U> Poly<T,U>
 where U: PolyTraits,
       T: Borrow<[U::Coeff]>,
-      U::Coeff: Zero + Clone + for<'c> MulAssign<&'c U::Coeff> + for<'c> AddAssign<&'c U::Coeff>,
+      U::Coeff: Clone + Zero + for<'c> MulAssign<&'c U::Coeff> + for<'c> AddAssign<&'c U::Coeff>,
 {
     #[inline(always)]
     pub fn eval(&self, x: &U::Coeff) -> U::Coeff {
@@ -200,9 +205,11 @@ where U: PolyTraits,
 }
 
 
-fn dot_product_in<'a,'b,'c,T>(result: &'a mut T, lhs: impl Iterator<Item=&'b T>, rhs: impl Iterator<Item=&'c T>)
-where T: AddAssign + 'b + 'c,
-      &'b T: Mul<&'c T, Output=T>,
+fn dot_product_in<T,U,V>(result: &mut T, lhs: U, rhs: V)
+where T: AddAssign,
+      U: Iterator,
+      V: Iterator,
+      U::Item: Mul<V::Item, Output=T>,
 {
     let mut zipit = lhs.zip(rhs);
     let (a,b) = zipit.next().expect("dot product must be with non-empty iterators");
@@ -212,9 +219,9 @@ where T: AddAssign + 'b + 'c,
     }
 }
 
-fn classical_slice_mul<'a,'b,'c,T>(output: &'a mut [T], lhs: &'b [T], rhs: &'c [T])
-where T: AddAssign + 'b + 'c,
-      &'b T: Mul<&'c T, Output=T>,
+fn classical_slice_mul<T>(output: &mut [T], lhs: &[T], rhs: &[T])
+where T: AddAssign,
+      for<'a> &'a T: Mul<Output=T>,
 {
     if lhs.len() == 0 || rhs.len() == 0 {
         assert_eq!(output.len(), 0);
@@ -252,8 +259,8 @@ where T: AddAssign + 'b + 'c,
     }
 }
 
-fn horner_slice<'a,'b,T>(coeffs: &'a [T], x: &'b T) -> T
-where T: Clone + Zero + MulAssign<&'b T> + for<'c> AddAssign<&'c T>,
+fn horner_slice<T>(coeffs: &[T], x: &T) -> T
+where T: Clone + Zero + for<'c> MulAssign<&'c T> + for<'c> AddAssign<&'c T>,
 {
     let mut coeffs = coeffs.iter().rev();
     match coeffs.next() {
@@ -268,6 +275,53 @@ where T: Clone + Zero + MulAssign<&'b T> + for<'c> AddAssign<&'c T>,
         None => T::zero(),
     }
 }
+
+// see also: https://docs.rs/num-traits/0.2.14/src/num_traits/pow.rs.html#189-211
+#[inline]
+fn refpow<T>(base: &T, exp: usize) -> T
+where T: Clone + One + for<'a> MulAssign<&'a T>,
+      for<'a> &'a T: Mul<Output=T>,
+{
+    match exp {
+        0 => T::one(),
+        1 => base.clone(),
+        _ => {
+            let mut acc = base * base;
+            let mut curexp = exp >> 1;
+
+            // invariant: curexp > 0 and base^exp = acc^curexp * base^(exp mod 2)
+            while curexp & 1 == 0 {
+                acc = &acc * &acc;
+                curexp >>= 1;
+            }
+            // now: curexp positive odd, base^exp = acc^curexp * base^(exp mod 2)
+
+            if curexp > 1 {
+                let mut basepow = &acc * &acc;
+                curexp >>= 1;
+
+                // invariant: curexp > 0 and base^exp = acc * basepow^curexp * base^(exp mod 2)
+                while curexp > 1 {
+                    if curexp & 1 == 1 {
+                        acc *= &basepow;
+                    }
+                    basepow = &basepow * &basepow;
+                    curexp >>= 1;
+                }
+                // now: curexp == 1 and base^exp = acc * basepow * base^(exp mod 2)
+
+                acc *= &basepow;
+            }
+            // now: curexp == 1 and base^exp = acc * base^(exp mod 2)
+
+            if exp & 1 == 1 {
+                acc *= &base;
+            }
+            acc
+        }
+    }
+}
+
 
 // --- BAD LINEAR SOLVER, TODO REPLACE WITH BETTER "SUPERFAST" SOLVERS ---
 
@@ -434,6 +488,20 @@ mod tests {
             let info = ClassicalTraits::mp_eval_prep(pts.iter());
             assert!(f.mp_eval(info).into_iter().eq(
                 pts.iter().map(|x| f.eval(x))));
+        }
+    }
+
+    #[test]
+    fn refpowtest() {
+        assert_eq!(refpow(&3u64, 0), 1);
+        assert_eq!(refpow(&25u64, 1), 25);
+        assert_eq!(refpow(&4u64, 2), 16);
+        assert_eq!(refpow(&-5i32, 3), -125);
+        assert_eq!(refpow(&2u16, 8), 256);
+        let mut pow3 = 1u64;
+        for d in 1..41 {
+            pow3 *= 3u64;
+            assert_eq!(refpow(&3u64, d), pow3);
         }
     }
 }
