@@ -1,4 +1,12 @@
 #![warn(missing_docs)]
+#![warn(missing_crate_level_docs)]
+#![warn(macro_use_extern_crate)]
+#![warn(invalid_html_tags)]
+#![warn(missing_copy_implementations)]
+#![warn(missing_debug_implementations)]
+#![warn(unreachable_pub)]
+#![warn(unused_extern_crates)]
+#![warn(unused_lifetimes)]
 
 //! Basic polynomial arithmetic, multi-point evaluation, and sparse interpolation.
 //!
