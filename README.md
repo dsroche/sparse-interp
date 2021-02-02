@@ -2,7 +2,7 @@
 
 Basic polynomial arithmetic, multi-point evaluation, and sparse interpolation.
 
-This crate is **very limiteda** so far in its functionality and under **active development**.
+This crate is **very limited** so far in its functionality and under **active development**.
 The current functionality isi mostly geared towards
 sparse interpolation with a known set of possible exponents.
 Expect frequent breaking changes as things get started.
@@ -94,4 +94,4 @@ public domain in the United States and is not copyrightable.
 
 [0BSD]: https://opensource.org/licenses/0BSD
 
-Otherwise, the [0-clause BSD license](0BSD) applies.
+Otherwise, the [0-clause BSD license][0BSD] applies.

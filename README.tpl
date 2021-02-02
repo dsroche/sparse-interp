@@ -13,4 +13,4 @@ public domain in the United States and is not copyrightable.
 
 [0BSD]: https://opensource.org/licenses/0BSD
 
-Otherwise, the [0-clause BSD license](0BSD) applies.
+Otherwise, the [0-clause BSD license][0BSD] applies.

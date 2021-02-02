@@ -8,6 +8,7 @@ repository = "https://github.com/dsroche/sparse-interp/"
 license = "0BSD"
 keywords = ["polynomial", "interpolation", "sparse", "field"]
 categories = ["mathematics", "algorithms", "no-std"]
+repository = "https://github.com/dsroche/sparse-interp"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
