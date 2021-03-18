@@ -997,13 +997,9 @@ where M: IntoIterator,
         {
             let pivot_inverse = (&workmat[i][i]).inv();
             sol[i] *= &pivot_inverse;
-            // FIXME REMOVE sol[i] /= &workmat[i][i];
-            let (left, right) = workmat[i].split_at_mut(i+1);
-            for x in right {
-                // FIXME REMOVE *x /= &left[i];
+            for x in workmat[i].split_at_mut(i+1).1 {
                 *x *= &pivot_inverse;
             }
-            // FIXME REMOVE left[i].set_one();
             workmat[i][i].set_one();
         }
         // cancel
