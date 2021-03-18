@@ -281,9 +281,6 @@ pub trait PolyTraits {
     /// The type of polynomial coefficients.
     type Coeff;
 
-    /// An opaque type returned by the pre-processing method [`Self::mp_eval_prep()`].
-    type EvalInfo;
-
     /// An opaque type returned by the pre-processing method [`Self::sparse_interp_prep()`].
     type SparseInterpInfo;
 
@@ -310,8 +307,15 @@ pub trait PolyTraits {
     ///
     /// The same pre-processed output can be used repeatedly to
     /// evaluate possibly different polynomials at the same points.
-    fn mp_eval_prep<'a>(pts: impl Iterator<Item=&'a Self::Coeff>) -> Self::EvalInfo
-    where Self::Coeff: 'a;
+    ///
+    /// The default implementation should be used; it relies on the [`EvalTypes::prep()`]
+    /// trait method specialized for the coefficient and evaluation types.
+    fn mp_eval_prep<'a, U: 'a>(pts: impl Iterator<Item=&'a U>) -> <EvalTrait<Self,U> as EvalTypes>::EvalInfo
+    where EvalTrait<Self,U>: EvalTypes<Coeff=Self::Coeff, Eval=U>
+    {
+        <EvalTrait<Self,U> as EvalTypes>::prep(pts)
+    }
+
 
     /// Multi-point evaluation.
     ///
@@ -333,7 +337,17 @@ pub trait PolyTraits {
     /// TraitImpl::mp_eval_slice(&mut evals, &g[..], &preprocess);
     /// assert_eq!(evals, vec![321, 66, 7654, 4 - 5*5 + 6*25 - 7*125]);
     /// ```
-    fn mp_eval_slice(out: &mut impl Extend<Self::Coeff>, coeffs: &[Self::Coeff], info: &Self::EvalInfo);
+    ///
+    /// The provided implementation should generally be used; it relies on the
+    /// [`EvalTypes::post()`] trait method specialized for the coefficient and
+    /// evaluation types.
+    fn mp_eval_slice<U>(out: &mut impl Extend<U>,
+                        coeffs: &[Self::Coeff],
+                        info: &<EvalTrait<Self,U> as EvalTypes>::EvalInfo)
+    where EvalTrait<Self,U>: EvalTypes<Coeff=Self::Coeff, Eval=U>
+    {
+        <EvalTrait<Self,U> as EvalTypes>::post(out, coeffs, info)
+    }
 
     /// Pre-processing for sparse interpolation.
     ///
@@ -391,6 +405,67 @@ pub trait PolyTraits {
         -> Option<Vec<(usize, Self::Coeff)>>;
 }
 
+/// A trait struct used for multi-point evaluation of polynomials.
+///
+/// Typically, `T` will be a type which implements `PolyTraits` and
+/// `U` will be the type of evaluation point. If the combination of `T`
+/// and `U` is meaningful, then `EvalTrait<T,U>` should implement
+/// `EvalTypes`; this indicates that polynomials under trait `T`
+/// can be evaluated at points of type `U`.
+///
+/// The purpose of this is to allow a polynomial with coefficients of
+/// one type (say, integers) to be evaluated at a point with another type
+/// (say, complex numbers, or integers modulo a prime).
+///
+/// ```
+/// # use sparse_interp::*;
+/// type Eval = EvalTrait<ClassicalTraits<i32>, f32>;
+/// let coeffs = [1, 0, -2];
+/// let pts = [0.5, -1.5];
+/// let info = Eval::prep(pts.iter());
+/// let mut result = Vec::new();
+/// Eval::post(&mut result, &coeffs, &info);
+/// assert_eq!(result, vec![0.5, -3.5]);
+/// ```
+///
+/// This is essentially a work-around for a problem better solved by
+/// [GATs](https://github.com/rust-lang/rust/issues/44265).
+/// (At the time of this writing, GAT is merged in nightly rust but not
+/// stable.)
+pub struct EvalTrait<T: ?Sized, U>(PhantomData<T>,PhantomData<U>);
+
+pub trait EvalTypes {
+    type Coeff;
+    type Eval;
+    type EvalInfo;
+
+    fn prep<'a>(pts: impl Iterator<Item=&'a Self::Eval>) -> Self::EvalInfo
+    where Self::Eval: 'a,
+    ;
+
+    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo);
+}
+
+impl<C,U> EvalTypes for EvalTrait<ClassicalTraits<C>, U>
+where C: Clone + Into<U>,
+      U: Clone + Zero + MulAssign + AddAssign,
+{
+    type Coeff = C;
+    type Eval = U;
+    type EvalInfo = Vec<U>;
+
+    fn prep<'a>(pts: impl Iterator<Item=&'a Self::Eval>) -> Self::EvalInfo
+    where Self::Eval: 'a
+    {
+        pts.cloned().collect()
+    }
+
+    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) {
+        //out.extend(coeffs.iter().zip(info.iter()).map(|(c,x)| { let mut out = x.clone(); out *= c; out }));
+        out.extend(info.iter().map(|x| horner_eval(coeffs.iter(), x)));
+    }
+}
+
 /// PolyTraits implementation for classical (slow) algorithms.
 ///
 /// The underlying algorithms are neither fast nor numerically stable.
@@ -405,29 +480,15 @@ pub trait PolyTraits {
 pub struct ClassicalTraits<C>(PhantomData<C>);
 
 impl<C> PolyTraits for ClassicalTraits<C>
-where C: Clone + Zero + One + Neg<Output=C> + AddAssign + SubAssign
-        + for<'a> MulAssign<&'a C> + for<'a> AddAssign<&'a C> + for<'a> DivAssign<&'a C>,
-      for<'a> &'a C: Mul<Output=C>,
+where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
+        + AddAssign + SubAssign + MulAssign + DivAssign,
 {
     type Coeff = C;
-    type EvalInfo = Vec<C>;
     type SparseInterpInfo = (usize, Vec<(usize, C)>);
 
     #[inline(always)]
     fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]) {
         classical_slice_mul(out, lhs, rhs);
-    }
-
-    #[inline]
-    fn mp_eval_prep<'a>(pts: impl Iterator<Item=&'a Self::Coeff>) -> Self::EvalInfo
-    where Self::Coeff: 'a
-    {
-        pts.map(Clone::clone).collect()
-    }
-
-    #[inline]
-    fn mp_eval_slice(out: &mut impl Extend<Self::Coeff>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) {
-        out.extend(info.iter().map(|x| horner_slice(coeffs, x)));
     }
 
     fn sparse_interp_prep(theta: &Self::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
@@ -438,14 +499,17 @@ where C: Clone + Zero + One + Neg<Output=C> + AddAssign + SubAssign
         (sparsity, theta_pows)
     }
 
-    fn sparse_interp_slice(evals: &[Self::Coeff], info: &Self::SparseInterpInfo, close: &impl CloseTo<Item=Self::Coeff>)
-        -> Option<Vec<(usize, Self::Coeff)>>
+    fn sparse_interp_slice(
+        evals: &[Self::Coeff],
+        info: &Self::SparseInterpInfo,
+        close: &impl CloseTo<Item=Self::Coeff>,
+        ) -> Option<Vec<(usize, Self::Coeff)>>
     {
         assert_eq!(evals.len(), 2*info.0);
-        bad_berlekamp_massey(evals).and_then(|mut lambda| {
+        bad_berlekamp_massey(evals, close).and_then(|mut lambda| {
             lambda.push(-C::one());
             let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
-                |(deg, rootpow)| match close.close_to_zero(&horner_slice(&lambda, rootpow)) {
+                |(deg, rootpow)| match close.close_to_zero(&horner_eval(lambda.iter(), rootpow)) {
                     true => Some((deg, rootpow)),
                     false => None,
                 }).unzip();
@@ -462,7 +526,7 @@ where C: Clone + Zero + One + Neg<Output=C> + AddAssign + SubAssign
                         self.0.iter().copied()
                     }
                 }
-                bad_trans_vand_solve(&IterHolder(roots), &evals[..degs.len()]).map(
+                bad_trans_vand_solve(&IterHolder(roots), &evals[..degs.len()], close).map(
                     |coeffs| degs.into_iter().zip(coeffs.into_iter()).collect())
             }
         })
@@ -621,7 +685,7 @@ where U: PolyTraits,
 impl<T,U> Poly<T,U>
 where U: PolyTraits,
       T: Borrow<[U::Coeff]>,
-      U::Coeff: Clone + Zero + for<'c> MulAssign<&'c U::Coeff> + for<'c> AddAssign<&'c U::Coeff>,
+      U::Coeff: Clone + Zero + AddAssign + MulAssign,
 {
     /// Evaluate this polynomial at the given point.
     ///
@@ -629,7 +693,7 @@ where U: PolyTraits,
     /// and d additions, where d is the degree of self.
     #[inline(always)]
     pub fn eval(&self, x: &U::Coeff) -> U::Coeff {
-        horner_slice(self.rep.borrow(), x)
+        horner_eval(self.rep.borrow().iter(), x)
     }
 
     /// Perform pre-processing for multi-point evaluation.
@@ -638,8 +702,8 @@ where U: PolyTraits,
     ///
     /// See [`PolyTraits::mp_eval_prep()`] for more details.
     #[inline(always)]
-    pub fn mp_eval_prep<'a>(pts: impl Iterator<Item=&'a U::Coeff>) -> U::EvalInfo
-    where U::Coeff: 'a,
+    pub fn mp_eval_prep<'a, V: 'a>(pts: impl Iterator<Item=&'a V>) -> <EvalTrait<U,V> as EvalTypes>::EvalInfo
+    where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         U::mp_eval_prep(pts)
     }
@@ -648,7 +712,9 @@ where U: PolyTraits,
     ///
     /// `info` should be the result of calling [`Self::mp_eval_prep()`].
     #[inline]
-    pub fn mp_eval_post(&self, info: &U::EvalInfo) -> Vec<U::Coeff> {
+    pub fn mp_eval_post<V>(&self, info: &<EvalTrait<U,V> as EvalTypes>::EvalInfo) -> Vec<V>
+    where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
+    {
         let mut out = Vec::new();
         U::mp_eval_slice(&mut out, self.rep.borrow(), info);
         out
@@ -659,9 +725,14 @@ where U: PolyTraits,
     /// Performs multi-point evaluation using the underlying trait algorithms.
     /// In general, this can be much more efficient than repeatedly calling
     /// [`self.eval()`].
+    ///
+    /// If different polynomials will repeatedly be evaluated at the same set
+    /// of points, consider using the pre- and post-processed versions
+    /// [`Self::mp_eval_prep()`] and [`self.mp_eval_post()`] instead for even
+    /// greater efficiency.
     #[inline(always)]
-    pub fn mp_eval<'a>(&self, pts: impl Iterator<Item=&'a U::Coeff>) -> Vec<U::Coeff>
-    where U::Coeff: 'a,
+    pub fn mp_eval<'a, V: 'a>(&self, pts: impl Iterator<Item=&'a V>) -> Vec<V>
+    where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         self.mp_eval_post(&Self::mp_eval_prep(pts))
     }
@@ -827,23 +898,22 @@ where U: PolyTraits,
     }
 }
 
-fn dot_product_in<T,U,V>(result: &mut T, lhs: U, rhs: V)
-where T: AddAssign,
-      U: Iterator,
-      V: Iterator,
-      U::Item: Mul<V::Item, Output=T>,
+fn dot_product<'a,'b,T,U>(lhs: impl Iterator<Item=&'a T>, rhs: impl Iterator<Item=&'b U>) -> T
+where T: 'a + Clone + Mul<Output=T> + AddAssign,
+      U: 'b + Clone + Into<T>,
 {
-    let mut zipit = lhs.zip(rhs);
+    let mut zipit = lhs.cloned().zip(rhs.cloned());
     let (a,b) = zipit.next().expect("dot product must be with non-empty iterators");
-    *result = a * b;
+    let mut out = a * b.into();
     for (a,b) in zipit {
-        *result += a * b;
+        out += a * b.into();
     }
+    out
 }
 
-fn classical_slice_mul<T>(output: &mut [T], lhs: &[T], rhs: &[T])
-where T: AddAssign,
-      for<'a> &'a T: Mul<Output=T>,
+fn classical_slice_mul<T,U>(output: &mut [T], lhs: &[T], rhs: &[U])
+where T: Clone + Mul<Output=T> + AddAssign,
+      U: Clone + Into<T>,
 {
     if lhs.len() == 0 || rhs.len() == 0 {
         assert_eq!(output.len(), 0);
@@ -855,89 +925,87 @@ where T: AddAssign,
     let mut i = 0;
 
     while i < lhs.len() && i < rhs.len() {
-        dot_product_in(&mut output[i], lhs[..i+1].iter(), rhs[..i+1].iter().rev());
+        output[i] = dot_product(lhs[..i+1].iter(), rhs[..i+1].iter().rev());
         i = i + 1;
     }
 
     let mut j = 1;
     while i < lhs.len() {
-        dot_product_in(&mut output[i], lhs[j..i+1].iter(), rhs.iter().rev());
+        output[i] = dot_product(lhs[j..i+1].iter(), rhs.iter().rev());
         i = i + 1;
         j = j + 1;
     }
 
     let mut k = 1;
     while i < rhs.len() {
-        dot_product_in(&mut output[i], lhs.iter(), rhs[k..i+1].iter().rev());
+        output[i] = dot_product(lhs.iter(), rhs[k..i+1].iter().rev());
         i = i + 1;
         k = k + 1;
     }
 
     while i < output.len() {
-        dot_product_in(&mut output[i], lhs[j..].iter(), rhs[k..].iter().rev());
+        output[i] = dot_product(lhs[j..].iter(), rhs[k..].iter().rev());
         i = i + 1;
         j = j + 1;
         k = k + 1;
     }
 }
 
-fn horner_slice<T>(coeffs: &[T], x: &T) -> T
-where T: Clone + Zero + for<'c> MulAssign<&'c T> + for<'c> AddAssign<&'c T>,
+fn horner_eval<'a,'b,T,U>(mut coeffs: impl DoubleEndedIterator<Item=&'a T>, x: &'b U) -> U
+where T: 'a + Clone + Into<U>,
+      U: Clone + Zero + MulAssign + AddAssign,
 {
-    let mut coeffs = coeffs.iter().rev();
-    match coeffs.next() {
-        Some(leading) => {
-            let mut out = leading.clone();
-            for coeff in coeffs {
-                out *= x;
-                out += &coeff;
-            }
-            out
-        },
-        None => T::zero(),
+    if let Some(leading) = coeffs.next_back() {
+        let mut out = leading.clone().into();
+        for coeff in coeffs.rev() {
+            out *= x.clone();
+            out += coeff.clone().into();
+        }
+        out
+    } else {
+        U::zero()
     }
 }
 
 // see also: https://docs.rs/num-traits/0.2.14/src/num_traits/pow.rs.html#189-211
 #[inline]
 fn refpow<T>(base: &T, exp: usize) -> T
-where T: Clone + One + for<'a> MulAssign<&'a T>,
-      for<'a> &'a T: Mul<Output=T>,
+where T: Clone + One + Mul<Output=T> + MulAssign,
 {
     match exp {
         0 => T::one(),
         1 => base.clone(),
         _ => {
-            let mut acc = base * base;
+            let mut acc = base.clone() * base.clone();
             let mut curexp = exp >> 1;
 
             // invariant: curexp > 0 and base^exp = acc^curexp * base^(exp mod 2)
             while curexp & 1 == 0 {
-                acc = &acc * &acc;
+                acc *= acc.clone();
                 curexp >>= 1;
             }
             // now: curexp positive odd, base^exp = acc^curexp * base^(exp mod 2)
 
             if curexp > 1 {
-                let mut basepow = &acc * &acc;
+                let mut basepow = acc.clone() * acc.clone();
                 curexp >>= 1;
 
                 // invariant: curexp > 0 and base^exp = acc * basepow^curexp * base^(exp mod 2)
                 while curexp > 1 {
                     if curexp & 1 == 1 {
-                        acc *= &basepow;
+                        acc *= basepow.clone();
                     }
-                    basepow = &basepow * &basepow;
+                    basepow *= basepow.clone();
                     curexp >>= 1;
                 }
                 // now: curexp == 1 and base^exp = acc * basepow * base^(exp mod 2)
 
-                acc *= &basepow;
+                acc *= basepow.clone();
             }
             // now: curexp == 1 and base^exp = acc * base^(exp mod 2)
 
             if exp & 1 == 1 {
-                acc *= &base;
+                acc *= base.clone();
             }
             acc
         }
@@ -947,11 +1015,14 @@ where T: Clone + One + for<'a> MulAssign<&'a T>,
 
 // --- BAD LINEAR SOLVER, TODO REPLACE WITH BETTER "SUPERFAST" SOLVERS ---
 
-fn bad_linear_solve<'a,'b,M,T>(matrix: M, rhs: impl IntoIterator<Item=&'b T>) -> Option<Vec<T>>
+fn bad_linear_solve<'a,'b,M,T>(
+    matrix: M,
+    rhs: impl IntoIterator<Item=&'b T>,
+    close: &impl CloseTo<Item=T>,
+    ) -> Option<Vec<T>>
 where M: IntoIterator,
       M::Item: IntoIterator<Item=&'a T>,
-      T: 'a + 'b + Clone + Zero + One + SubAssign + for<'x> DivAssign<&'x T>,
-      for<'x> &'x T: Mul<Output=T>,
+      T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + DivAssign,
 {
     let mut workmat: Vec<Vec<_>> =
         matrix .into_iter()
@@ -966,7 +1037,7 @@ where M: IntoIterator,
     for i in 0..n {
         { // find pivot
             let mut j = i;
-            while workmat[j][i].is_zero() {
+            while close.close_to_zero(&workmat[j][i]) {
                 j += 1;
                 if j == n {
                     return None;
@@ -978,11 +1049,11 @@ where M: IntoIterator,
             }
         }
         // normalize pivot row
-        sol[i] /= &workmat[i][i];
+        sol[i] /= workmat[i][i].clone();
         {
             let (left, right) = workmat[i].split_at_mut(i+1);
             for x in right {
-                *x /= &left[i];
+                *x /= left[i].clone();
             }
             left[i].set_one();
         }
@@ -995,12 +1066,12 @@ where M: IntoIterator,
             for (row, solx) in top.iter_mut().chain(bottom.iter_mut())
                                .zip(soltop.iter_mut().chain(solbot.iter_mut()))
             {
-                if !row[i].is_zero() {
+                if !close.close_to_zero(&row[i]) {
                     let (left, right) = row.split_at_mut(i+1);
                     for (j, x) in (i+1..n).zip(right) {
-                        *x -= &left[i] * &pivrow[j];
+                        *x -= left[i].clone() * pivrow[j].clone();
                     }
-                    *solx -= &left[i] * solpiv;
+                    *solx -= left[i].clone() * solpiv.clone();
                 }
             }
         }
@@ -1008,30 +1079,32 @@ where M: IntoIterator,
     Some(sol)
 }
 
-fn bad_berlekamp_massey<T>(seq: &[T]) -> Option<Vec<T>>
-where T: Clone + Zero + One + SubAssign + for<'b> DivAssign<&'b T>,
-      for<'b> &'b T: Mul<Output=T>,
+fn bad_berlekamp_massey<T>(seq: &[T], close: &impl CloseTo<Item=T>) -> Option<Vec<T>>
+where T: Clone + One + Mul<Output=T> + SubAssign + DivAssign,
 {
     assert_eq!(seq.len() % 2, 0);
     let n = seq.len() / 2;
     bad_linear_solve(
         (0..n).map(|i| &seq[i..i+n]),
-        &seq[n..2*n])
+        &seq[n..2*n],
+        close)
 }
 
-fn bad_trans_vand_solve<'a,'b,T,U>(roots: U, rhs: impl IntoIterator<Item=&'b T>)
+fn bad_trans_vand_solve<'a,'b,T,U>(
+    roots: U,
+    rhs: impl IntoIterator<Item=&'b T>,
+    close: &impl CloseTo<Item=T>)
     -> Option<Vec<T>>
-where T: 'a + 'b + Clone + Zero + One + SubAssign + for<'c> DivAssign<&'c T>,
-      for<'c> &'c T: Mul<Output=T>,
+where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + DivAssign,
       U: Copy + IntoIterator<Item=&'a T>,
       U::IntoIter: ExactSizeIterator,
 {
     let n = roots.into_iter().len();
     let mat: Vec<_> = iter::successors(
         Some(iter::repeat_with(One::one).take(n).collect::<Vec<T>>()),
-        |row| Some(row.iter().zip(roots.into_iter()).map(|(x,y)| x*y).collect())
+        |row| Some(row.iter().cloned().zip(roots.into_iter().cloned()).map(|(x,y)| x * y).collect())
     ).take(n).collect();
-    bad_linear_solve(&mat, rhs)
+    bad_linear_solve(&mat, rhs, close)
 }
 
 #[cfg(test)]
@@ -1040,6 +1113,7 @@ mod tests {
 
     #[test]
     fn bad_linear_algebra() {
+        let very_close = RelativeParams::<f64>::new(None, None);
         {
             let mat :Vec<Vec<f64>> = vec![
                 vec![2., 2., 2.],
@@ -1047,7 +1121,7 @@ mod tests {
                 vec![5., 3., -3.],
             ];
             let rhs = vec![12., -12., 10.];
-            assert_eq!(bad_linear_solve(&mat, &rhs), Some(vec![5., -2., 3.]));
+            assert_eq!(bad_linear_solve(&mat, &rhs, &very_close), Some(vec![5., -2., 3.]));
         }
 
         {
@@ -1058,18 +1132,18 @@ mod tests {
                 vec![3., 11., 12., 77.],
             ];
             let rhs = vec![1., 2., 3., 4.];
-            assert_eq!(bad_linear_solve(&mat, &rhs), None);
+            assert_eq!(bad_linear_solve(&mat, &rhs, &very_close), None);
         }
 
         {
             let seq = vec![1., 0., 5., -2., 12., -1.];
-            assert_eq!(bad_berlekamp_massey(&seq), Some(vec![3., 2., -1.]));
+            assert_eq!(bad_berlekamp_massey(&seq, &very_close), Some(vec![3., 2., -1.]));
         }
 
         {
             let roots = vec![2., -1., 3.];
             let rhs = vec![8.5, 29., 70.];
-            assert_eq!(bad_trans_vand_solve(&roots, &rhs), Some(vec![4.5,-2.,6.]));
+            assert_eq!(bad_trans_vand_solve(&roots, &rhs, &very_close), Some(vec![4.5,-2.,6.]));
         }
     }
 
