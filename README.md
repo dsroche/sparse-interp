@@ -15,14 +15,14 @@ algorithms via the [`ClassicalTraits`] trait.
 use sparse_interp::ClassicalPoly;
 
 // f represents 4 + 3x^2 - x^3
-let f = ClassicalPoly::new(vec![4, 0, 3, -1]);
+let f = ClassicalPoly::<f32>::new(vec![4., 0., 3., -1.]);
 
 // g prepresents 2x
-let g = ClassicalPoly::new(vec![0, 2]);
+let g = ClassicalPoly::<f32>::new(vec![0., 2.]);
 
 // basic arithmetic is supported
 let h = f + g;
-assert_eq!(h, ClassicalPoly::new(vec![4, 2, 3, -1]));
+assert_eq!(h, ClassicalPoly::new(vec![4., 2., 3., -1.]));
 ```
 
 ## Evaluation
@@ -30,11 +30,11 @@ assert_eq!(h, ClassicalPoly::new(vec![4, 2, 3, -1]));
 Single-point and multi-point evaluation work as follows.
 
 ```rust
-let h = ClassicalPoly::new(vec![4, 2, 3, -1]);
-assert_eq!(h.eval(&0), 4);
-assert_eq!(h.eval(&1), 8);
-assert_eq!(h.eval(&-1), 6);
-assert_eq!(h.mp_eval([0,1,-1].iter()), [4,8,6]);
+let h = ClassicalPoly::<f32>::new(vec![4., 2., 3., -1.]);
+assert_eq!(h.eval(&0.), 4.);
+assert_eq!(h.eval(&1.), 8.);
+assert_eq!(h.eval(&-1.), 6.);
+assert_eq!(h.mp_eval([0.,1.,-1.].iter()), [4.,8.,6.]);
 ```
 
 If the same evaluation points are used for multiple polynomials,
@@ -83,7 +83,7 @@ for (_,c) in result.iter_mut() {
 assert_eq!(result, [(1, -2.5), (5, 7.1)]);
 ```
 
-Current version: 0.0.1
+Current version: 0.0.2
 
 ## License
 

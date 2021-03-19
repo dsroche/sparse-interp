@@ -23,14 +23,14 @@
 //! use sparse_interp::ClassicalPoly;
 //!
 //! // f represents 4 + 3x^2 - x^3
-//! let f = ClassicalPoly::new(vec![4, 0, 3, -1]);
+//! let f = ClassicalPoly::<f32>::new(vec![4., 0., 3., -1.]);
 //!
 //! // g prepresents 2x
-//! let g = ClassicalPoly::new(vec![0, 2]);
+//! let g = ClassicalPoly::<f32>::new(vec![0., 2.]);
 //!
 //! // basic arithmetic is supported
 //! let h = f + g;
-//! assert_eq!(h, ClassicalPoly::new(vec![4, 2, 3, -1]));
+//! assert_eq!(h, ClassicalPoly::new(vec![4., 2., 3., -1.]));
 //! ```
 //!
 //! # Evaluation
@@ -39,11 +39,11 @@
 //!
 //! ```
 //! # use sparse_interp::ClassicalPoly;
-//! let h = ClassicalPoly::new(vec![4, 2, 3, -1]);
-//! assert_eq!(h.eval(&0), 4);
-//! assert_eq!(h.eval(&1), 8);
-//! assert_eq!(h.eval(&-1), 6);
-//! assert_eq!(h.mp_eval([0,1,-1].iter()), [4,8,6]);
+//! let h = ClassicalPoly::<f32>::new(vec![4., 2., 3., -1.]);
+//! assert_eq!(h.eval(&0.), 4.);
+//! assert_eq!(h.eval(&1.), 8.);
+//! assert_eq!(h.eval(&-1.), 6.);
+//! assert_eq!(h.mp_eval([0.,1.,-1.].iter()), [4.,8.,6.]);
 //! ```
 //!
 //! If the same evaluation points are used for multiple polynomials,
@@ -101,7 +101,6 @@ use core::{
         AddAssign,
         SubAssign,
         MulAssign,
-        DivAssign,
     },
     borrow::{
         Borrow,
@@ -123,6 +122,7 @@ use core::{
 use num_traits::{
     Zero,
     One,
+    Inv,
 };
 
 /// A possibly-stateful comparison for exact or approximate types.
@@ -143,6 +143,14 @@ pub trait CloseTo {
 
     /// Indicates `true` if `x` is approximately zero.
     fn close_to_zero(&self, x: &Self::Item) -> bool;
+
+    /// Checks closeness over an iteration.
+    fn close_to_iter<'a, Iter1, Iter2>(&'a self, x: Iter1, y: Iter2) -> bool
+    where Iter1: Iterator<Item=&'a Self::Item>,
+          Iter2: Iterator<Item=&'a Self::Item>,
+    {
+        x.zip(y).all(|(xi, yi)| self.close_to(xi, yi))
+    }
 }
 
 /// A struct to use for exact equality in the [`CloseTo`] trait.
@@ -194,7 +202,7 @@ impl<T: PartialEq> CloseTo for CloseToEq<T> {
 /// assert!(! test.close_to(&0.1, &0.11));
 /// assert!(! test.close_to_zero(&0.06));
 /// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelativeParams<T, E=T>
 {
     /// Below this threshold in absolute value, values are considered close to zero.
@@ -222,6 +230,14 @@ macro_rules! impl_relative_params {
                     max_relative: max_relative.unwrap_or($E::EPSILON),
                     phantom: PhantomData,
                 }
+            }
+        }
+
+        impl Default for RelativeParams<$T,$E> {
+            /// Create a closeness tester with machine epsilon precision.
+            #[inline(always)]
+            fn default() -> Self {
+                Self::new(None, None)
             }
         }
 
@@ -291,12 +307,12 @@ pub trait PolyTraits {
     ///
     /// ```
     /// # use sparse_interp::*;
-    /// # type TraitImpl = ClassicalTraits<i32>;
-    /// let a = [1, 2, 3];
-    /// let b = [4, 5];
-    /// let mut c = [0; 4];
+    /// # type TraitImpl = ClassicalTraits<f32>;
+    /// let a = [1., 2., 3.];
+    /// let b = [4., 5.];
+    /// let mut c = [0.; 4];
     /// TraitImpl::slice_mul(&mut c[..], &a[..], &b[..]);
-    /// assert_eq!(c, [1*4, 1*5 + 2*4, 2*5 + 3*4, 3*5]);
+    /// assert_eq!(c, [1.*4., 1.*5. + 2.*4., 2.*5. + 3.*4., 3.*5.]);
     /// ```
     fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]);
 
@@ -324,18 +340,18 @@ pub trait PolyTraits {
     ///
     /// ```
     /// # use sparse_interp::*;
-    /// # type TraitImpl = ClassicalTraits<i32>;
-    /// let pts = [10, -5];
+    /// # type TraitImpl = ClassicalTraits<f32>;
+    /// let pts = [10., -5.];
     /// let preprocess = TraitImpl::mp_eval_prep(pts.iter());
     ///
-    /// let f = [1, 2, 3];
+    /// let f = [1., 2., 3.];
     /// let mut evals = Vec::new();
     /// TraitImpl::mp_eval_slice(&mut evals, &f[..], &preprocess);
-    /// assert_eq!(evals, vec![321, 66]);
+    /// assert_eq!(evals, vec![321., 66.]);
     ///
-    /// let g = [4, 5, 6, 7];
+    /// let g = [4., 5., 6., 7.];
     /// TraitImpl::mp_eval_slice(&mut evals, &g[..], &preprocess);
-    /// assert_eq!(evals, vec![321, 66, 7654, 4 - 5*5 + 6*25 - 7*125]);
+    /// assert_eq!(evals, vec![321., 66., 7654., 4. - 5.*5. + 6.*25. - 7.*125.]);
     /// ```
     ///
     /// The provided implementation should generally be used; it relies on the
@@ -481,7 +497,7 @@ pub struct ClassicalTraits<C>(PhantomData<C>);
 
 impl<C> PolyTraits for ClassicalTraits<C>
 where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
-        + AddAssign + SubAssign + MulAssign + DivAssign,
+        + AddAssign + SubAssign + MulAssign + Inv<Output=C>,
 {
     type Coeff = C;
     type SparseInterpInfo = (usize, Vec<(usize, C)>);
@@ -542,11 +558,11 @@ where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
 ///
 /// ```
 /// # use sparse_interp::*;
-/// let f: ClassicalPoly<_> = ClassicalPoly::new(vec![1, 2, 3]);
-/// let g: ClassicalPoly<_> = ClassicalPoly::new(vec![4, 5]);
+/// let f = ClassicalPoly::<f64>::new(vec![1., 2., 3.]);
+/// let g = ClassicalPoly::<f64>::new(vec![4., 5.]);
 ///
-/// assert_eq!(&f * &g, ClassicalPoly::new(vec![4, 13, 22, 15]));
-/// assert_eq!(&f + &g, ClassicalPoly::new(vec![5, 7, 3]));
+/// assert_eq!(&f * &g, ClassicalPoly::new(vec![4., 13., 22., 15.]));
+/// assert_eq!(&f + &g, ClassicalPoly::new(vec![5., 7., 3.]));
 /// ```
 ///
 /// Type aliases are provided for various combinations that will work well.
@@ -1022,7 +1038,7 @@ fn bad_linear_solve<'a,'b,M,T>(
     ) -> Option<Vec<T>>
 where M: IntoIterator,
       M::Item: IntoIterator<Item=&'a T>,
-      T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + DivAssign,
+      T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
 {
     let mut workmat: Vec<Vec<_>> =
         matrix .into_iter()
@@ -1049,13 +1065,13 @@ where M: IntoIterator,
             }
         }
         // normalize pivot row
-        sol[i] /= workmat[i][i].clone();
         {
-            let (left, right) = workmat[i].split_at_mut(i+1);
-            for x in right {
-                *x /= left[i].clone();
+            let pivot_inverse = workmat[i][i].clone().inv();
+            for x in workmat[i].split_at_mut(i+1).1 {
+                *x *= pivot_inverse.clone();
             }
-            left[i].set_one();
+            sol[i] *= pivot_inverse;
+            workmat[i][i].set_one();
         }
         // cancel
         {
@@ -1080,7 +1096,7 @@ where M: IntoIterator,
 }
 
 fn bad_berlekamp_massey<T>(seq: &[T], close: &impl CloseTo<Item=T>) -> Option<Vec<T>>
-where T: Clone + One + Mul<Output=T> + SubAssign + DivAssign,
+where T: Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
 {
     assert_eq!(seq.len() % 2, 0);
     let n = seq.len() / 2;
@@ -1095,7 +1111,7 @@ fn bad_trans_vand_solve<'a,'b,T,U>(
     rhs: impl IntoIterator<Item=&'b T>,
     close: &impl CloseTo<Item=T>)
     -> Option<Vec<T>>
-where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + DivAssign,
+where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
       U: Copy + IntoIterator<Item=&'a T>,
       U::IntoIter: ExactSizeIterator,
 {
@@ -1109,11 +1125,14 @@ where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + DivAssign,
 
 #[cfg(test)]
 mod tests {
+    use num_rational::{
+        Rational32,
+    };
     use super::*;
 
     #[test]
     fn bad_linear_algebra() {
-        let very_close = RelativeParams::<f64>::new(None, None);
+        let very_close = RelativeParams::<f64>::default();
         {
             let mat :Vec<Vec<f64>> = vec![
                 vec![2., 2., 2.],
@@ -1121,7 +1140,9 @@ mod tests {
                 vec![5., 3., -3.],
             ];
             let rhs = vec![12., -12., 10.];
-            assert_eq!(bad_linear_solve(&mat, &rhs, &very_close), Some(vec![5., -2., 3.]));
+            assert!(very_close.close_to_iter(
+                bad_linear_solve(&mat, &rhs, &very_close).unwrap().iter(),
+                [5., -2., 3.].iter()));
         }
 
         {
@@ -1137,36 +1158,44 @@ mod tests {
 
         {
             let seq = vec![1., 0., 5., -2., 12., -1.];
-            assert_eq!(bad_berlekamp_massey(&seq, &very_close), Some(vec![3., 2., -1.]));
+            assert!(very_close.close_to_iter(
+                bad_berlekamp_massey(&seq, &very_close).unwrap().iter(),
+                [3., 2., -1.].iter()));
         }
 
         {
             let roots = vec![2., -1., 3.];
             let rhs = vec![8.5, 29., 70.];
-            assert_eq!(bad_trans_vand_solve(&roots, &rhs, &very_close), Some(vec![4.5,-2.,6.]));
+            assert!(very_close.close_to_iter(
+                bad_trans_vand_solve(&roots, &rhs, &very_close).unwrap().iter(),
+                [4.5,-2.,6.].iter()));
         }
     }
 
     #[test]
     fn add() {
-        let a = vec![10, 20, 30, 40];
-        let b = vec![3, 4, 5];
-        let c = vec![13, 24, 35, 40];
+        let a: Vec<_> = [10, 20, 30, 40]
+            .iter().copied().map(Rational32::from_integer).collect();
+        let b: Vec<_> = [3, 4, 5]
+            .iter().copied().map(Rational32::from_integer).collect();
+        let c: Vec<_> = [13, 24, 35, 40]
+            .iter().copied().map(Rational32::from_integer).collect();
 
         let ap: ClassicalPoly<_> = a.iter().copied().collect();
         let bp: ClassicalPoly<_> = b.iter().copied().collect();
         let cp: ClassicalPoly<_> = c.iter().copied().collect();
 
-        //assert_eq!(&ap + &bp, cp);
-        //assert_eq!(&bp + &ap, cp);
         assert_eq!(ap + bp, cp);
     }
 
     #[test]
     fn mul() {
-        let a = vec![1, 2, 3, 4, 5];
-        let b = vec![300, 4, 50000];
-        let c = vec![300, 604, 50908, 101212, 151516, 200020, 250000];
+        let a: Vec<_> = [1, 2, 3, 4, 5]
+            .iter().copied().map(Rational32::from_integer).collect();
+        let b: Vec<_> = [300, 4, 50000]
+            .iter().copied().map(Rational32::from_integer).collect();
+        let c: Vec<_> = [300, 604, 50908, 101212, 151516, 200020, 250000]
+            .iter().copied().map(Rational32::from_integer).collect();
 
         let ap: ClassicalPoly<_> = a.iter().copied().collect();
         let bp: ClassicalPoly<_> = b.iter().copied().collect();
@@ -1178,11 +1207,12 @@ mod tests {
 
     #[test]
     fn eval() {
-        let f: ClassicalPoly<_> = vec![-5,3,-1,2].into_iter().collect();
-        assert_eq!(f.eval(&-3),
-            -5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3);
+        let f: ClassicalPoly<_> = [-5,3,-1,2].iter().copied().map(Rational32::from_integer).collect();
+
+        assert_eq!(f.eval(&Rational32::from_integer(-3)),
+            Rational32::from_integer(-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3));
         {
-            let pts = vec![-2,0,7];
+            let pts: Vec<_> = [-2,0,7].iter().copied().map(Rational32::from_integer).collect();
             assert!(f.mp_eval(pts.iter()).into_iter().eq(
                 pts.iter().map(|x| f.eval(x))));
         }
