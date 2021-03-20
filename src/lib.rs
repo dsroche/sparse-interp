@@ -43,7 +43,7 @@
 //! assert_eq!(h.eval(&0.), 4.);
 //! assert_eq!(h.eval(&1.), 8.);
 //! assert_eq!(h.eval(&-1.), 6.);
-//! assert_eq!(h.mp_eval([0.,1.,-1.].iter()), [4.,8.,6.]);
+//! assert_eq!(h.mp_eval([0.,1.,-1.].iter()).unwrap(), [4.,8.,6.]);
 //! ```
 //!
 //! If the same evaluation points are used for multiple polynomials,
@@ -74,7 +74,7 @@
 //! let t = 2;
 //! let theta = 1.8f64;
 //! let eval_pts = [1., theta, theta.powi(2), theta.powi(3)];
-//! let evals = f.mp_eval(eval_pts.iter());
+//! let evals = f.mp_eval(eval_pts.iter()).unwrap();
 //! let error = 0.001;
 //! let mut result = ClassicalPoly::sparse_interp(
 //!     &theta,    // evaluation base point
@@ -124,6 +124,24 @@ use num_traits::{
     One,
     Inv,
 };
+use conv::{
+    ApproxInto,
+};
+use custom_error::custom_error;
+
+custom_error!{
+    /// Errors that arise in polynomial arithmetic or sparse interpolation.
+    #[derive(PartialEq)]
+    #[allow(missing_docs)]
+    pub Error
+        FromCoeff{cause: String}
+            = "Could not convert coefficient: {cause}",
+        Singular = "Encountered singular matrix when expecting nonsingular; perhaps sparsity was set too low",
+        MissingExponents = "The exponent of a non-zero term was missing from the list",
+}
+
+/// A specialized [core::result::Result] type for sparse interpolation.
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// A possibly-stateful comparison for exact or approximate types.
 ///
@@ -326,6 +344,7 @@ pub trait PolyTraits {
     ///
     /// The default implementation should be used; it relies on the [`EvalTypes::prep()`]
     /// trait method specialized for the coefficient and evaluation types.
+    #[inline(always)]
     fn mp_eval_prep<'a, U: 'a>(pts: impl Iterator<Item=&'a U>) -> <EvalTrait<Self,U> as EvalTypes>::EvalInfo
     where EvalTrait<Self,U>: EvalTypes<Coeff=Self::Coeff, Eval=U>
     {
@@ -357,9 +376,10 @@ pub trait PolyTraits {
     /// The provided implementation should generally be used; it relies on the
     /// [`EvalTypes::post()`] trait method specialized for the coefficient and
     /// evaluation types.
+    #[inline(always)]
     fn mp_eval_slice<U>(out: &mut impl Extend<U>,
                         coeffs: &[Self::Coeff],
-                        info: &<EvalTrait<Self,U> as EvalTypes>::EvalInfo)
+                        info: &<EvalTrait<Self,U> as EvalTypes>::EvalInfo) -> Result<()>
     where EvalTrait<Self,U>: EvalTypes<Coeff=Self::Coeff, Eval=U>
     {
         <EvalTrait<Self,U> as EvalTypes>::post(out, coeffs, info)
@@ -418,7 +438,7 @@ pub trait PolyTraits {
     /// assert!(close_check.close_to(&sp_result[1].1, &f[7]));
     /// ```
     fn sparse_interp_slice(evals: &[Self::Coeff], info: &Self::SparseInterpInfo, close: &impl CloseTo<Item=Self::Coeff>)
-        -> Option<Vec<(usize, Self::Coeff)>>;
+        -> Result<Vec<(usize, Self::Coeff)>>;
 }
 
 /// A trait struct used for multi-point evaluation of polynomials.
@@ -448,22 +468,39 @@ pub trait PolyTraits {
 /// [GATs](https://github.com/rust-lang/rust/issues/44265).
 /// (At the time of this writing, GAT is merged in nightly rust but not
 /// stable.)
+#[derive(Debug)]
 pub struct EvalTrait<T: ?Sized, U>(PhantomData<T>,PhantomData<U>);
 
+/// Trait for evaluating polynomials over (possibly) a different domain.
+///
+/// Evaluation is divided into pre-processing [`EvalTypes::prep`] stage, which depends only on the
+/// evaluation points, and the actual evaluation phase [`EvalTypes::post`].
+///
+/// Typically the provided blanket implementations for [`EvalTrait`] should be sufficient,
+/// unless you care creating a new polynomial type.
 pub trait EvalTypes {
+    /// Coefficient type of the polynomial being evaluated.
     type Coeff;
+    /// Type of the evaluation point(s) and the output(s) of the polynomial evaluation.
     type Eval;
+    /// Opaque type to hold pre-processing results.
     type EvalInfo;
 
+    /// Pre-processing for multi-point evaluation.
+    ///
+    /// Takes a list of evaluation points and prepares an `EvalInfo` opaque
+    /// object which can be re-used to evaluate multiple polynomials over
+    /// the same evaluation points.
     fn prep<'a>(pts: impl Iterator<Item=&'a Self::Eval>) -> Self::EvalInfo
     where Self::Eval: 'a,
     ;
 
-    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo);
+    /// Multi-point evaluation after pre-processing.
+    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) -> Result<()>;
 }
 
 impl<C,U> EvalTypes for EvalTrait<ClassicalTraits<C>, U>
-where C: Clone + Into<U>,
+where C: Clone + ApproxInto<U>,
       U: Clone + Zero + MulAssign + AddAssign,
 {
     type Coeff = C;
@@ -476,9 +513,11 @@ where C: Clone + Into<U>,
         pts.cloned().collect()
     }
 
-    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) {
+    fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) -> Result<()> {
         //out.extend(coeffs.iter().zip(info.iter()).map(|(c,x)| { let mut out = x.clone(); out *= c; out }));
-        out.extend(info.iter().map(|x| horner_eval(coeffs.iter(), x)));
+		ErrorIter::new(info.iter().map(|x| horner_eval(coeffs.iter(), x)))
+            .map(|evals| out.extend(evals))
+        //out.extend(info.iter().map(|x| horner_eval(coeffs.iter(), x)));
     }
 }
 
@@ -519,33 +558,37 @@ where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
         evals: &[Self::Coeff],
         info: &Self::SparseInterpInfo,
         close: &impl CloseTo<Item=Self::Coeff>,
-        ) -> Option<Vec<(usize, Self::Coeff)>>
+        ) -> Result<Vec<(usize, Self::Coeff)>>
     {
         assert_eq!(evals.len(), 2*info.0);
-        bad_berlekamp_massey(evals, close).and_then(|mut lambda| {
-            lambda.push(-C::one());
-            let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
-                |(deg, rootpow)| match close.close_to_zero(&horner_eval(lambda.iter(), rootpow)) {
+        let mut lambda = bad_berlekamp_massey(evals, close)?;
+        lambda.push(-C::one());
+        let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
+            |(deg, rootpow)|
+            horner_eval(lambda.iter(), rootpow).ok().and_then(
+                |eval| match close.close_to_zero(&eval) {
                     true => Some((deg, rootpow)),
                     false => None,
-                }).unzip();
-            if degs.len() != lambda.len() - 1 {
-                // some roots were not in the list; problem!
-                None
-            } else {
-                // Note, seems dumb I had to do this just to turn &&C into &C, but alas...
-                struct IterHolder<'a,T>(Vec<&'a T>);
-                impl<'a,T> IntoIterator for &'a IterHolder<'a, T> {
-                    type Item = &'a T;
-                    type IntoIter = iter::Copied<slice::Iter<'a, &'a T>>;
-                    fn into_iter(self) -> Self::IntoIter {
-                        self.0.iter().copied()
-                    }
                 }
-                bad_trans_vand_solve(&IterHolder(roots), &evals[..degs.len()], close).map(
-                    |coeffs| degs.into_iter().zip(coeffs.into_iter()).collect())
+            )
+        ).unzip();
+        if degs.len() != lambda.len() - 1 {
+            Err(Error::MissingExponents)
+        } else {
+            // Note, seems dumb I had to do this just to turn &&C into &C, but alas...
+            struct IterHolder<'a,T>(Vec<&'a T>);
+            impl<'a,T> IntoIterator for &'a IterHolder<'a, T> {
+                type Item = &'a T;
+                type IntoIter = iter::Copied<slice::Iter<'a, &'a T>>;
+                fn into_iter(self) -> Self::IntoIter {
+                    self.0.iter().copied()
+                }
             }
-        })
+            let evslice = &evals[..degs.len()];
+            Ok(degs.into_iter().zip(
+                bad_trans_vand_solve(&IterHolder(roots), evslice, close)?.into_iter()
+            ).collect())
+        }
     }
 }
 
@@ -709,7 +752,8 @@ where U: PolyTraits,
     /// and d additions, where d is the degree of self.
     #[inline(always)]
     pub fn eval(&self, x: &U::Coeff) -> U::Coeff {
-        horner_eval(self.rep.borrow().iter(), x)
+        // error should be impossible since x has same type as coefficients
+        horner_eval(self.rep.borrow().iter(), x).unwrap()
     }
 
     /// Perform pre-processing for multi-point evaluation.
@@ -728,12 +772,12 @@ where U: PolyTraits,
     ///
     /// `info` should be the result of calling [`Self::mp_eval_prep()`].
     #[inline]
-    pub fn mp_eval_post<V>(&self, info: &<EvalTrait<U,V> as EvalTypes>::EvalInfo) -> Vec<V>
+    pub fn mp_eval_post<V>(&self, info: &<EvalTrait<U,V> as EvalTypes>::EvalInfo) -> Result<Vec<V>>
     where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         let mut out = Vec::new();
-        U::mp_eval_slice(&mut out, self.rep.borrow(), info);
-        out
+        U::mp_eval_slice(&mut out, self.rep.borrow(), info)?;
+        Ok(out)
     }
 
     /// Evaluate this polynomial at all of the given points.
@@ -747,7 +791,7 @@ where U: PolyTraits,
     /// [`Self::mp_eval_prep()`] and [`self.mp_eval_post()`] instead for even
     /// greater efficiency.
     #[inline(always)]
-    pub fn mp_eval<'a, V: 'a>(&self, pts: impl Iterator<Item=&'a V>) -> Vec<V>
+    pub fn mp_eval<'a, V: 'a>(&self, pts: impl Iterator<Item=&'a V>) -> Result<Vec<V>>
     where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         self.mp_eval_post(&Self::mp_eval_prep(pts))
@@ -785,7 +829,7 @@ where U: PolyTraits,
     /// sorted by increasing exponent values.
     #[inline(always)]
     pub fn sparse_interp_post(evals: &[U::Coeff], info: &U::SparseInterpInfo, close: &impl CloseTo<Item=U::Coeff>)
-        -> Option<Vec<(usize, U::Coeff)>>
+        -> Result<Vec<(usize, U::Coeff)>>
     {
         U::sparse_interp_slice(evals, info, close)
     }
@@ -811,7 +855,7 @@ where U: PolyTraits,
         expons: impl Iterator<Item=usize>,
         evals: &[U::Coeff],
         close: &impl CloseTo<Item=U::Coeff>)
-        -> Option<Vec<(usize, U::Coeff)>>
+        -> Result<Vec<(usize, U::Coeff)>>
     {
         Self::sparse_interp_post(evals, &U::sparse_interp_prep(theta, sparsity, expons), close)
     }
@@ -967,19 +1011,22 @@ where T: Clone + Mul<Output=T> + AddAssign,
     }
 }
 
-fn horner_eval<'a,'b,T,U>(mut coeffs: impl DoubleEndedIterator<Item=&'a T>, x: &'b U) -> U
-where T: 'a + Clone + Into<U>,
+fn horner_eval<'a,'b,T,U>(mut coeffs: impl DoubleEndedIterator<Item=&'a T>, x: &'b U)
+    -> Result<U>
+where T: 'a + Clone + ApproxInto<U>,
       U: Clone + Zero + MulAssign + AddAssign,
 {
     if let Some(leading) = coeffs.next_back() {
-        let mut out = leading.clone().into();
+        let mut out = leading.clone().approx_into()
+            .map_err(|e| Error::FromCoeff{cause: e.to_string()})?;
         for coeff in coeffs.rev() {
             out *= x.clone();
-            out += coeff.clone().into();
+            out += coeff.clone().approx_into()
+                .map_err(|e| Error::FromCoeff{cause: e.to_string()})?;
         }
-        out
+        Ok(out)
     } else {
-        U::zero()
+        Ok(U::zero())
     }
 }
 
@@ -1035,7 +1082,7 @@ fn bad_linear_solve<'a,'b,M,T>(
     matrix: M,
     rhs: impl IntoIterator<Item=&'b T>,
     close: &impl CloseTo<Item=T>,
-    ) -> Option<Vec<T>>
+    ) -> Result<Vec<T>>
 where M: IntoIterator,
       M::Item: IntoIterator<Item=&'a T>,
       T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
@@ -1056,7 +1103,7 @@ where M: IntoIterator,
             while close.close_to_zero(&workmat[j][i]) {
                 j += 1;
                 if j == n {
-                    return None;
+                    return Err(Error::Singular);
                 }
             }
             if i != j {
@@ -1092,10 +1139,10 @@ where M: IntoIterator,
             }
         }
     }
-    Some(sol)
+    Ok(sol)
 }
 
-fn bad_berlekamp_massey<T>(seq: &[T], close: &impl CloseTo<Item=T>) -> Option<Vec<T>>
+fn bad_berlekamp_massey<T>(seq: &[T], close: &impl CloseTo<Item=T>) -> Result<Vec<T>>
 where T: Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
 {
     assert_eq!(seq.len() % 2, 0);
@@ -1110,7 +1157,7 @@ fn bad_trans_vand_solve<'a,'b,T,U>(
     roots: U,
     rhs: impl IntoIterator<Item=&'b T>,
     close: &impl CloseTo<Item=T>)
-    -> Option<Vec<T>>
+    -> Result<Vec<T>>
 where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
       U: Copy + IntoIterator<Item=&'a T>,
       U::IntoIter: ExactSizeIterator,
@@ -1121,6 +1168,55 @@ where T: 'a + 'b + Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Out
         |row| Some(row.iter().cloned().zip(roots.into_iter().cloned()).map(|(x,y)| x * y).collect())
     ).take(n).collect();
     bad_linear_solve(&mat, rhs, close)
+}
+
+struct ErrorIter<I,E> {
+    iter: I,
+    err: Option<E>,
+}
+
+impl<'a,I,E,T> Iterator for &'a mut ErrorIter<I,E>
+where
+    I: 'a + Iterator<Item=core::result::Result<T,E>>,
+    T: 'a,
+    E: 'a,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.err {
+            Some(_) => None,
+            None => {
+                match self.iter.next() {
+                    Some(Ok(x)) => Some(x),
+                    Some(Err(e)) => {
+                        self.err = Some(e);
+                        None
+                    }
+                    None => None,
+                }
+            }
+        }
+    }
+}
+
+impl<I,E> ErrorIter<I,E> {
+    fn new(iter: I) -> Self {
+        Self {
+            iter,
+            err: None,
+        }
+    }
+
+    fn map<F,T>(mut self, f: F) -> core::result::Result<T,E>
+    where F: FnOnce(&mut Self) -> T
+    {
+        let x = f(&mut self);
+        match self.err {
+            Some(e) => Err(e),
+            None => Ok(x),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1153,7 +1249,7 @@ mod tests {
                 vec![3., 11., 12., 77.],
             ];
             let rhs = vec![1., 2., 3., 4.];
-            assert_eq!(bad_linear_solve(&mat, &rhs, &very_close), None);
+            assert_eq!(bad_linear_solve(&mat, &rhs, &very_close), Err(Error::Singular));
         }
 
         {
@@ -1213,7 +1309,7 @@ mod tests {
             Rational32::from_integer(-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3));
         {
             let pts: Vec<_> = [-2,0,7].iter().copied().map(Rational32::from_integer).collect();
-            assert!(f.mp_eval(pts.iter()).into_iter().eq(
+            assert!(f.mp_eval(pts.iter()).unwrap().into_iter().eq(
                 pts.iter().map(|x| f.eval(x))));
         }
     }
@@ -1257,7 +1353,7 @@ mod tests {
         let theta = 1.2f64;
         let t = 3;
         let xs: Vec<_> = (0..2*t).map(|i| theta.powi(i as i32)).collect();
-        let ys = f.mp_eval(xs.iter());
+        let ys = f.mp_eval(xs.iter()).unwrap();
         let eq_test = RelativeParams::<f64>::new(Some(0.00000001), Some(0.00000001));
         let expected_sparse = f.rep.iter().enumerate().filter(|(_,c)| **c != 0.);
         // sparse interpolation starts here
