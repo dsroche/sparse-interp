@@ -458,30 +458,31 @@ where C: Clone + Zero + One + Neg<Output=C> + AddAssign + SubAssign
         -> Option<Vec<(usize, Self::Coeff)>>
     {
         assert_eq!(evals.len(), 2*info.0);
-        bad_berlekamp_massey(evals).and_then(|mut lambda| {
-            lambda.push(-C::one());
-            let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
-                |(deg, rootpow)| match close.close_to_zero(&horner_slice(&lambda, rootpow)) {
-                    true => Some((deg, rootpow)),
-                    false => None,
-                }).unzip();
-            if degs.len() != lambda.len() - 1 {
-                // some roots were not in the list; problem!
-                None
-            } else {
-                // Note, seems dumb I had to do this just to turn &&C into &C, but alas...
-                struct IterHolder<'a,T>(Vec<&'a T>);
-                impl<'a,T> IntoIterator for &'a IterHolder<'a, T> {
-                    type Item = &'a T;
-                    type IntoIter = iter::Copied<slice::Iter<'a, &'a T>>;
-                    fn into_iter(self) -> Self::IntoIter {
-                        self.0.iter().copied()
+        for k in (1..=info.0).rev() {
+            if let Some(mut lambda) = bad_berlekamp_massey(&evals[..2*k]) {
+                lambda.push(-C::one());
+                let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
+                    |(deg, rootpow)| match close.close_to_zero(&horner_slice(&lambda, rootpow)) {
+                        true => Some((deg, rootpow)),
+                        false => None,
+                    }).unzip();
+                if degs.len() == lambda.len() - 1 {
+                    // Note, seems dumb I had to do this just to turn &&C into &C, but alas...
+                    struct IterHolder<'a,T>(Vec<&'a T>);
+                    impl<'a,T> IntoIterator for &'a IterHolder<'a, T> {
+                        type Item = &'a T;
+                        type IntoIter = iter::Copied<slice::Iter<'a, &'a T>>;
+                        fn into_iter(self) -> Self::IntoIter {
+                            self.0.iter().copied()
+                        }
+                    }
+                    if let Some(coeffs) = bad_trans_vand_solve(&IterHolder(roots), &evals[..degs.len()]) {
+                        return Some(degs.into_iter().zip(coeffs.into_iter()).collect());
                     }
                 }
-                bad_trans_vand_solve(&IterHolder(roots), &evals[..degs.len()]).map(
-                    |coeffs| degs.into_iter().zip(coeffs.into_iter()).collect())
             }
-        })
+        }
+        None
     }
 }
 
@@ -1179,13 +1180,30 @@ mod tests {
     }
 
     #[test]
-    fn classical_sparse_interp() {
+    fn classical_sparse_interp_exact() {
         let f: ClassicalPoly<_> = vec![3., 0., -2., 0., 0., 0., -1.].into_iter().collect();
         let theta = 1.2f64;
         let t = 3;
         let xs: Vec<_> = (0..2*t).map(|i| theta.powi(i as i32)).collect();
         let ys = f.mp_eval(xs.iter());
         let eq_test = RelativeParams::<f64>::new(Some(0.00000001), Some(0.00000001));
+        let expected_sparse = f.rep.iter().enumerate().filter(|(_,c)| **c != 0.);
+        // sparse interpolation starts here
+        let si_info = ClassicalPoly::sparse_interp_prep(&theta, t, 0..10);
+        let sparse_f = ClassicalPoly::sparse_interp_post(&ys, &si_info, &eq_test).expect("sparse interp failed");
+        assert!(eq_by(sparse_f.iter(), expected_sparse,
+            |(d1,c1), (d2,c2)| *d1 == d2 && eq_test.close_to(c1, c2)
+            ));
+    }
+
+    #[test]
+    fn classical_sparse_interp_overshoot() {
+        let f: ClassicalPoly<_> = vec![3., 0., -2., 0., 0., 0., -1.].into_iter().collect();
+        let theta = 1.2f64;
+        let t = 5;
+        let xs: Vec<_> = (0..2*t).map(|i| theta.powi(i as i32)).collect();
+        let ys = f.mp_eval(xs.iter());
+        let eq_test = RelativeParams::<f64>::new(Some(0.0000001), Some(0.0000001));
         let expected_sparse = f.rep.iter().enumerate().filter(|(_,c)| **c != 0.);
         // sparse interpolation starts here
         let si_info = ClassicalPoly::sparse_interp_prep(&theta, t, 0..10);

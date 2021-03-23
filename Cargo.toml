@@ -1,6 +1,6 @@
 [package]
 name = "sparse-interp"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Daniel S. Roche <dsroche@gmail.com>"]
 edition = "2018"
 description = "Basic univariate polynomial arithmetic and sparse polynomial interpolation."
