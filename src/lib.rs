@@ -40,10 +40,10 @@
 //! ```
 //! # use sparse_interp::ClassicalPoly;
 //! let h = ClassicalPoly::<f32>::new(vec![4., 2., 3., -1.]);
-//! assert_eq!(h.eval(&0.), 4.);
-//! assert_eq!(h.eval(&1.), 8.);
-//! assert_eq!(h.eval(&-1.), 6.);
-//! assert_eq!(h.mp_eval([0.,1.,-1.].iter()).unwrap(), [4.,8.,6.]);
+//! assert_eq!(h.eval(&0.), Ok(4.));
+//! assert_eq!(h.eval(&1.), Ok(8.));
+//! assert_eq!(h.eval(&-1.), Ok(6.));
+//! assert_eq!(h.mp_eval([0.,1.,-1.].iter().copied()).unwrap(), [4.,8.,6.]);
 //! ```
 //!
 //! If the same evaluation points are used for multiple polynomials,
@@ -74,7 +74,7 @@
 //! let t = 2;
 //! let theta = 1.8f64;
 //! let eval_pts = [1., theta, theta.powi(2), theta.powi(3)];
-//! let evals = f.mp_eval(eval_pts.iter()).unwrap();
+//! let evals = f.mp_eval(eval_pts.iter().copied()).unwrap();
 //! let error = 0.001;
 //! let mut result = ClassicalPoly::sparse_interp(
 //!     &theta,    // evaluation base point
@@ -128,6 +128,7 @@ use num_traits::{
 };
 use num_complex::{
     Complex,
+    Complex64,
 };
 use custom_error::custom_error;
 
@@ -199,270 +200,111 @@ impl<S> OneWay for DefConv<S,S>
 }
 
 macro_rules! one_way_as {
-    ($S:ty, $D:ty) => {
-        impl OneWay for DefConv<$S,$D> {
-            type Source = $S;
-            type Dest = $D;
-            fn one_way(src: $S) -> Result<$D> {
-                Ok(src as $D)
+    ($s:ty, $($ds:ty),+) => {
+        $(
+            impl OneWay for DefConv<$s,$ds> {
+                type Source = $s;
+                type Dest = $ds;
+                fn one_way(src: $s) -> Result<$ds> {
+                    Ok(src as $ds)
+                }
             }
-        }
-    }
+        )+
+    };
 }
 
 macro_rules! one_way_as_check {
-    ($S:ty, $D:ty) => {
-        impl OneWay for DefConv<$S,$D> {
-            type Source = $S;
-            type Dest = $D;
-            fn one_way(src: $S) -> Result<$D> {
-                let dest = src as $D;
-                if (dest as $S) == src {
-                    Ok(dest)
-                } else {
-                    Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($D))})
+    ($s:ty, $($ds:ty),+) => {
+        $(
+            impl OneWay for DefConv<$s,$ds> {
+                type Source = $s;
+                type Dest = $ds;
+                fn one_way(src: $s) -> Result<$ds> {
+                    let dest = src as $ds;
+                    if (dest as $s) == src {
+                        Ok(dest)
+                    } else {
+                        Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($ds))})
+                    }
                 }
             }
-        }
+        )+
     }
 }
 
 macro_rules! one_way_round {
-    ($S:ty, $D:ty) => {
-        impl OneWay for DefConv<$S,$D> {
-            type Source = $S;
-            type Dest = $D;
-            fn one_way(src: $S) -> Result<$D> {
-                let rounded = src.round();
-                let dest = rounded as $D;
-                if (dest as $S) == rounded {
-                    Ok(dest)
-                } else {
-                    Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($D))})
+    ($s:ty, $($ds:ty),+) => {
+        $(
+            impl OneWay for DefConv<$s,$ds> {
+                type Source = $s;
+                type Dest = $ds;
+                fn one_way(src: $s) -> Result<$ds> {
+                    let rounded = src.round();
+                    let dest = rounded as $ds;
+                    if (dest as $s) == rounded {
+                        Ok(dest)
+                    } else {
+                        Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($ds))})
+                    }
                 }
             }
-        }
+        )+
     }
 }
 
 macro_rules! one_way_try {
-    ($S:ty, $D:ty) => {
-        impl OneWay for DefConv<$S,$D> {
-            type Source = $S;
-            type Dest = $D;
-            fn one_way(src: $S) -> Result<$D> {
-                convert::TryInto::<$D>::try_into(src).map_err(|e| Error::CoeffConv{cause: e.to_string()})
+    ($s:ty, $($ds:ty),+) => {
+        $(
+            impl OneWay for DefConv<$s,$ds> {
+                type Source = $s;
+                type Dest = $ds;
+                fn one_way(src: $s) -> Result<$ds> {
+                    convert::TryInto::<$ds>::try_into(src).map_err(|e| Error::CoeffConv{cause: e.to_string()})
+                }
             }
-        }
+        )+
     }
 }
 
 //one_way_as!(i8, i8);
 one_way_try!(i8, u8);
-one_way_as!(i8, i16);
-one_way_as!(i8, u16);
-one_way_as!(i8, i32);
-one_way_as!(i8, u32);
-one_way_as!(i8, i64);
-one_way_as!(i8, u64);
-one_way_as!(i8, i128);
-one_way_as!(i8, u128);
-one_way_as!(i8, isize);
-one_way_as!(i8, usize);
-one_way_as!(i8, f32);
-one_way_as!(i8, f64);
+one_way_as!(i8, i16, u16, i32, u32, i64, u64, i128, u128, f32, f64);
 
 one_way_try!(u8, i8);
-//one_way_as!(u8, u8);
-one_way_as!(u8, i16);
-one_way_as!(u8, u16);
-one_way_as!(u8, i32);
-one_way_as!(u8, u32);
-one_way_as!(u8, i64);
-one_way_as!(u8, u64);
-one_way_as!(u8, i128);
-one_way_as!(u8, u128);
-one_way_as!(u8, isize);
-one_way_as!(u8, usize);
-one_way_as!(u8, f32);
-one_way_as!(u8, f64);
+one_way_as!(u8, i16, u16, i32, u32, i64, u64, i128, u128, f32, f64);
 
-one_way_try!(i16, i8);
-one_way_try!(i16, u8);
-//one_way_as!(i16, i16);
-one_way_try!(i16, u16);
-one_way_as!(i16, i32);
-one_way_as!(i16, u32);
-one_way_as!(i16, i64);
-one_way_as!(i16, u64);
-one_way_as!(i16, i128);
-one_way_as!(i16, u128);
-one_way_as!(i16, isize);
-one_way_as!(i16, usize);
-one_way_as!(i16, f32);
-one_way_as!(i16, f64);
+one_way_try!(i16, i8, u8, u16);
+one_way_as!(i16, i32, u32, i64, u64, i128, u128, f32, f64);
 
-one_way_try!(u16, i8);
-one_way_try!(u16, u8);
-one_way_try!(u16, i16);
-//one_way_as!(u16, u16);
-one_way_as!(u16, i32);
-one_way_as!(u16, u32);
-one_way_as!(u16, i64);
-one_way_as!(u16, u64);
-one_way_as!(u16, i128);
-one_way_as!(u16, u128);
-one_way_as!(u16, isize);
-one_way_as!(u16, usize);
-one_way_as!(u16, f32);
-one_way_as!(u16, f64);
+one_way_try!(u16, i8, u8, i16);
+one_way_as!(u16, i32, u32, i64, u64, i128, u128, f32, f64);
 
-one_way_try!(i32, i8);
-one_way_try!(i32, u8);
-one_way_try!(i32, i16);
-one_way_try!(i32, u16);
-//one_way_as!(i32, i32);
-one_way_try!(i32, u32);
-one_way_as!(i32, i64);
-one_way_as!(i32, u64);
-one_way_as!(i32, i128);
-one_way_as!(i32, u128);
-one_way_as!(i32, isize);
-one_way_try!(i32, usize);
+one_way_try!(i32, i8, u8, i16, u16, u32);
+one_way_as!(i32, i64, u64, i128, u128, f64);
 one_way_as_check!(i32, f32);
-one_way_as!(i32, f64);
 
-one_way_try!(u32, i8);
-one_way_try!(u32, u8);
-one_way_try!(u32, i16);
-one_way_try!(u32, u16);
-one_way_try!(u32, i32);
-//one_way_as!(u32, u32);
-one_way_as!(u32, i64);
-one_way_as!(u32, u64);
-one_way_as!(u32, i128);
-one_way_as!(u32, u128);
-one_way_try!(u32, isize);
-one_way_as!(u32, usize);
+one_way_try!(u32, i8, u8, i16, u16, i32);
+one_way_as!(u32, i64, u64, i128, u128, f64);
 one_way_as_check!(u32, f32);
-one_way_as!(u32, f64);
 
-one_way_try!(i64, i8);
-one_way_try!(i64, u8);
-one_way_try!(i64, i16);
-one_way_try!(i64, u16);
-one_way_try!(i64, i32);
-one_way_try!(i64, u32);
-//one_way_as!(i64, i64);
-one_way_try!(i64, u64);
-one_way_as!(i64, i128);
-one_way_as!(i64, u128);
-one_way_try!(i64, isize);
-one_way_try!(i64, usize);
-one_way_as_check!(i64, f32);
-one_way_as_check!(i64, f64);
+one_way_try!(i64, i8, u8, i16, u16, i32, u32, u64);
+one_way_as!(i64, i128, u128);
+one_way_as_check!(i64, f32, f64);
 
-one_way_try!(u64, i8);
-one_way_try!(u64, u8);
-one_way_try!(u64, i16);
-one_way_try!(u64, u16);
-one_way_try!(u64, i32);
-one_way_try!(u64, u32);
-one_way_try!(u64, i64);
-//one_way_as!(u64, u64);
-one_way_as!(u64, i128);
-one_way_as!(u64, u128);
-one_way_try!(u64, isize);
-one_way_try!(u64, usize);
-one_way_as_check!(u64, f32);
-one_way_as_check!(u64, f64);
+one_way_try!(u64, i8, u8, i16, u16, i32, u32, i64);
+one_way_as!(u64, i128, u128);
+one_way_as_check!(u64, f32, f64);
 
-one_way_try!(i128, i8);
-one_way_try!(i128, u8);
-one_way_try!(i128, i16);
-one_way_try!(i128, u16);
-one_way_try!(i128, i32);
-one_way_try!(i128, u32);
-one_way_try!(i128, i64);
-one_way_try!(i128, u64);
-//one_way_as!(i128, i128);
-one_way_try!(i128, u128);
-one_way_try!(i128, isize);
-one_way_try!(i128, usize);
-one_way_as_check!(i128, f32);
-one_way_as_check!(i128, f64);
+one_way_try!(i128, i8, u8, i16, u16, i32, u32, i64, u64, u128);
+one_way_as_check!(i128, f32, f64);
 
-one_way_try!(u128, i8);
-one_way_try!(u128, u8);
-one_way_try!(u128, i16);
-one_way_try!(u128, u16);
-one_way_try!(u128, i32);
-one_way_try!(u128, u32);
-one_way_try!(u128, i64);
-one_way_try!(u128, u64);
-one_way_try!(u128, i128);
-//one_way_as!(u128, u128);
-one_way_try!(u128, isize);
-one_way_try!(u128, usize);
-one_way_as_check!(u128, f32);
-one_way_as_check!(u128, f64);
+one_way_try!(u128, i8, u8, i16, u16, i32, u32, i64, u64, i128);
+one_way_as_check!(u128, f32, f64);
 
-one_way_try!(isize, i8);
-one_way_try!(isize, u8);
-one_way_try!(isize, i16);
-one_way_try!(isize, u16);
-one_way_try!(isize, i32);
-one_way_try!(isize, u32);
-one_way_try!(isize, i64);
-one_way_try!(isize, u64);
-one_way_try!(isize, i128);
-one_way_try!(isize, u128);
-//one_way_as!(isize, isize);
-one_way_try!(isize, usize);
-one_way_as_check!(isize, f32);
-one_way_as_check!(isize, f64);
-
-one_way_try!(usize, i8);
-one_way_try!(usize, u8);
-one_way_try!(usize, i16);
-one_way_try!(usize, u16);
-one_way_try!(usize, i32);
-one_way_try!(usize, u32);
-one_way_try!(usize, i64);
-one_way_try!(usize, u64);
-one_way_try!(usize, i128);
-one_way_try!(usize, u128);
-one_way_try!(usize, isize);
-//one_way_as!(usize, usize);
-one_way_as_check!(usize, f32);
-one_way_as_check!(usize, f64);
-
-one_way_round!(f32, i8);
-one_way_round!(f32, u8);
-one_way_round!(f32, i16);
-one_way_round!(f32, u16);
-one_way_round!(f32, i32);
-one_way_round!(f32, u32);
-one_way_round!(f32, i64);
-one_way_round!(f32, u64);
-one_way_round!(f32, i128);
-one_way_round!(f32, u128);
-one_way_round!(f32, isize);
-one_way_round!(f32, usize);
+one_way_round!(f32, i8, u8, i16, u16, i32, u32, i64, u64, i128, u128);
 one_way_as!(f32, f64);
 
-one_way_round!(f64, i8);
-one_way_round!(f64, u8);
-one_way_round!(f64, i16);
-one_way_round!(f64, u16);
-one_way_round!(f64, i32);
-one_way_round!(f64, u32);
-one_way_round!(f64, i64);
-one_way_round!(f64, u64);
-one_way_round!(f64, i128);
-one_way_round!(f64, u128);
-one_way_round!(f64, isize);
-one_way_round!(f64, usize);
+one_way_round!(f64, i8, u8, i16, u16, i32, u32, i64, u64, i128, u128);
 
 impl OneWay for DefConv<f64, f32> {
     type Source = f64;
@@ -478,32 +320,34 @@ impl OneWay for DefConv<f64, f32> {
     }
 }
 
-/* TODO
-impl<S,T> OneWay for DefConv<S, Complex<T>>
-where DefConv<S, T>: OneWay<Source=S, Dest=T>
-{
-    type Source = S;
-    type Dest = Complex<T>;
+macro_rules! two_way_complex {
+    ($t:ty, $($us:ty),+) => {
+        $(
+            impl OneWay for DefConv<$us, Complex<$t>> {
+                type Source = $us;
+                type Dest = Complex<$t>;
 
-    #[inline(always)]
-    fn one_way(src: S) -> Result<Complex<T>> {
-        Ok(Complex::<T>::from(DefConv::<S,T>::one_way(src)?))
-    }
+                #[inline(always)]
+                fn one_way(src: Self::Source) -> Result<Self::Dest> {
+                    Ok(Complex::from(DefConv::<$us,$t>::one_way(src)?))
+                }
+            }
+
+            impl OneWay for DefConv<Complex<$t>, $us> {
+                type Source = Complex<$t>;
+                type Dest = $us;
+
+                #[inline(always)]
+                fn one_way(src: Self::Source) -> Result<Self::Dest> {
+                    DefConv::<$t,$us>::one_way(src.norm())
+                }
+            }
+        )+
+    };
 }
 
-impl<D> OneWay for DefConv<Complex64, D>
-where DefConv<f64, D>: OneWay<Source=f64, Dest=D>
-{
-    type Source = Complex64;
-    type Dest = D;
-
-    #[inline(always)]
-    fn one_way(src: Complex64) -> Result<D> {
-        DefConv::<f64,D>::one_way(src.norm())
-    }
-}
-*/
-
+two_way_complex!(f32, i8, u8, i16, u16, i32, u32, i64, u64, i128, u128, f32, f64);
+two_way_complex!(f64, i8, u8, i16, u16, i32, u32, i64, u64, i128, u128, f32, f64);
 
 /// A possibly-stateful comparison for exact or approximate types.
 ///
@@ -677,6 +521,9 @@ pub trait PolyTraits {
     /// The type of polynomial coefficients.
     type Coeff;
 
+    /// The evaluation needed for sparse interpolation.
+    type SparseInterpEval: EvalTypes<Coeff=Self::Coeff>;
+
     /// An opaque type returned by the pre-processing method [`Self::sparse_interp_prep()`].
     type SparseInterpInfo;
 
@@ -707,7 +554,7 @@ pub trait PolyTraits {
     /// The default implementation should be used; it relies on the [`EvalTypes::prep()`]
     /// trait method specialized for the coefficient and evaluation types.
     #[inline(always)]
-    fn mp_eval_prep<'a, U: 'a>(pts: impl Iterator<Item=&'a U>) -> <EvalTrait<Self,U> as EvalTypes>::EvalInfo
+    fn mp_eval_prep<U>(pts: impl Iterator<Item=U>) -> <EvalTrait<Self,U> as EvalTypes>::EvalInfo
     where EvalTrait<Self,U>: EvalTypes<Coeff=Self::Coeff, Eval=U>
     {
         <EvalTrait<Self,U> as EvalTypes>::prep(pts)
@@ -723,7 +570,7 @@ pub trait PolyTraits {
     /// # use sparse_interp::*;
     /// # type TraitImpl = ClassicalTraits<f32>;
     /// let pts = [10., -5.];
-    /// let preprocess = TraitImpl::mp_eval_prep(pts.iter());
+    /// let preprocess = TraitImpl::mp_eval_prep(pts.iter().copied());
     ///
     /// let f = [1., 2., 3.];
     /// let mut evals = Vec::new();
@@ -750,20 +597,21 @@ pub trait PolyTraits {
     /// Pre-processing for sparse interpolation.
     ///
     /// This method must be called prior to
-    /// calling [`Self::mp_eval_slice()`].
+    /// calling [`Self::sparse_interp_slice()`].
     ///
     /// A later call to sparse interpolation is guaranteed to succeed only when, for some
     /// unknown polynomial `f`, the following are all true:
     /// *   `f` has at most `sparsity` non-zero terms
     /// *   The exponents of all non-zero terms of `f` appear in `expons`
-    /// *   `f` is evaluated at points `pow(theta, i)` for all `i` in `[0..2*sparsity]`.
+    /// *   The coefficients of `f` are bounded by `max_coeff` in magnitude.
     ///
     /// The list `expons` must be sorted in ascending order.
     ///
     /// The same pre-processed output can be used repeatedly to
     /// interpolate possibly different polynomials under the same settings.
-    fn sparse_interp_prep(theta: &Self::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
-        -> Self::SparseInterpInfo;
+    fn sparse_interp_prep(sparsity: usize, expons: impl Iterator<Item=usize>, max_coeff: &Self::Coeff)
+        -> (<Self::SparseInterpEval as EvalTypes>::EvalInfo, Self::SparseInterpInfo)
+    ;
 
     /// Sparse interpolation from special evaluation points.
     ///
@@ -820,7 +668,7 @@ pub trait PolyTraits {
 /// type Eval = EvalTrait<ClassicalTraits<i32>, f32>;
 /// let coeffs = [1, 0, -2];
 /// let pts = [0.5, -1.5];
-/// let info = Eval::prep(pts.iter());
+/// let info = Eval::prep(pts.iter().copied());
 /// let mut result = Vec::new();
 /// Eval::post(&mut result, &coeffs, &info);
 /// assert_eq!(result, vec![0.5, -3.5]);
@@ -853,9 +701,7 @@ pub trait EvalTypes {
     /// Takes a list of evaluation points and prepares an `EvalInfo` opaque
     /// object which can be re-used to evaluate multiple polynomials over
     /// the same evaluation points.
-    fn prep<'a>(pts: impl Iterator<Item=&'a Self::Eval>) -> Self::EvalInfo
-    where Self::Eval: 'a,
-    ;
+    fn prep(pts: impl Iterator<Item=Self::Eval>) -> Self::EvalInfo;
 
     /// Multi-point evaluation after pre-processing.
     fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) -> Result<()>;
@@ -870,10 +716,9 @@ where C: Clone,
     type Eval = U;
     type EvalInfo = Vec<U>;
 
-    fn prep<'a>(pts: impl Iterator<Item=&'a Self::Eval>) -> Self::EvalInfo
-    where Self::Eval: 'a
-    {
-        pts.cloned().collect()
+    #[inline(always)]
+    fn prep(pts: impl Iterator<Item=Self::Eval>) -> Self::EvalInfo {
+        pts.collect()
     }
 
     fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) -> Result<()> {
@@ -900,21 +745,32 @@ pub struct ClassicalTraits<C>(PhantomData<C>);
 impl<C> PolyTraits for ClassicalTraits<C>
 where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
         + AddAssign + SubAssign + MulAssign + Inv<Output=C>,
+      DefConv<C, Complex64>: TwoWay<Source=C, Dest=Complex64>,
 {
     type Coeff = C;
-    type SparseInterpInfo = (usize, Vec<(usize, C)>);
+    type SparseInterpEval = EvalTrait<Self, Complex64>;
+    type SparseInterpInfo = (usize, Vec<(usize, Complex64)>);
 
     #[inline(always)]
     fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]) {
         classical_slice_mul(out, lhs, rhs);
     }
 
-    fn sparse_interp_prep(theta: &Self::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
-        -> Self::SparseInterpInfo
+    fn sparse_interp_prep(sparsity: usize, expons: impl Iterator<Item=usize>, max_coeff: &Self::Coeff)
+        -> (<Self::SparseInterpEval as EvalTypes>::EvalInfo, Self::SparseInterpInfo)
     {
-        let theta_pows: Vec<_> = expons.map(|d| (d, refpow(theta, d))).collect();
-        assert!(sparsity <= theta_pows.len());
-        (sparsity, theta_pows)
+        let mut theta_pows: Vec<_> = expons.map(|d| (d, Complex64::default())).collect();
+        let theta = match theta_pows.iter().map(|pair| pair.0).max() {
+            Some(max_pow) => Complex64::from_polar(1., 2.*core::f64::consts::PI / (max_pow as f64)),
+            None => Complex64::default(),
+        };
+        for (ref expon, ref mut power) in theta_pows.iter_mut() {
+            *power = theta.powu(*expon as u32);
+        }
+        let max_pow = theta_pows.iter().map(|pair| pair.0).max();
+        (EvalTrait::<Self, Complex64>::prep((0..2*sparsity).map(|e| theta.powu(e as u32))),
+         (sparsity, theta_pows)
+        )
     }
 
     fn sparse_interp_slice(
@@ -1114,9 +970,11 @@ where U: PolyTraits,
     /// Uses Horner's rule to perform the evaluation using exactly d multiplications
     /// and d additions, where d is the degree of self.
     #[inline(always)]
-    pub fn eval(&self, x: &U::Coeff) -> U::Coeff {
-        // error should be impossible since x has same type as coefficients
-        horner_eval(self.rep.borrow().iter(), x).unwrap()
+    pub fn eval<V>(&self, x: &V) -> Result<V>
+    where DefConv<U::Coeff, V>: OneWay<Source=U::Coeff, Dest=V>,
+          V: Clone + Zero + AddAssign + MulAssign,
+    {
+        horner_eval(self.rep.borrow().iter(), x)
     }
 
     /// Perform pre-processing for multi-point evaluation.
@@ -1125,7 +983,7 @@ where U: PolyTraits,
     ///
     /// See [`PolyTraits::mp_eval_prep()`] for more details.
     #[inline(always)]
-    pub fn mp_eval_prep<'a, V: 'a>(pts: impl Iterator<Item=&'a V>) -> <EvalTrait<U,V> as EvalTypes>::EvalInfo
+    pub fn mp_eval_prep<V>(pts: impl Iterator<Item=V>) -> <EvalTrait<U,V> as EvalTypes>::EvalInfo
     where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         U::mp_eval_prep(pts)
@@ -1154,7 +1012,7 @@ where U: PolyTraits,
     /// [`Self::mp_eval_prep()`] and [`self.mp_eval_post()`] instead for even
     /// greater efficiency.
     #[inline(always)]
-    pub fn mp_eval<'a, V: 'a>(&self, pts: impl Iterator<Item=&'a V>) -> Result<Vec<V>>
+    pub fn mp_eval<V>(&self, pts: impl Iterator<Item=V>) -> Result<Vec<V>>
     where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
         self.mp_eval_post(&Self::mp_eval_prep(pts))
@@ -1668,11 +1526,11 @@ mod tests {
         let f: ClassicalPoly<_> = [-5,3,-1,2].iter().copied().map(Rational32::from_integer).collect();
 
         assert_eq!(f.eval(&Rational32::from_integer(-3)),
-            Rational32::from_integer(-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3));
+            Ok(Rational32::from_integer(-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3)));
         {
             let pts: Vec<_> = [-2,0,7].iter().copied().map(Rational32::from_integer).collect();
-            assert!(f.mp_eval(pts.iter()).unwrap().into_iter().eq(
-                pts.iter().map(|x| f.eval(x))));
+            assert!(f.mp_eval(pts.iter().copied()).unwrap().into_iter().eq(
+                pts.iter().map(|x| f.eval(x).unwrap())));
         }
     }
 
@@ -1715,7 +1573,7 @@ mod tests {
         let theta = 1.2f64;
         let t = 3;
         let xs: Vec<_> = (0..2*t).map(|i| theta.powi(i as i32)).collect();
-        let ys = f.mp_eval(xs.iter()).unwrap();
+        let ys = f.mp_eval(xs.iter().copied()).unwrap();
         let eq_test = RelativeParams::<f64>::new(Some(0.00000001), Some(0.00000001));
         let expected_sparse = f.rep.iter().enumerate().filter(|(_,c)| **c != 0.);
         // sparse interpolation starts here
