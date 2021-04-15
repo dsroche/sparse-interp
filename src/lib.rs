@@ -39,17 +39,14 @@
 //!
 //! ```
 //! # use sparse_interp::ClassicalPoly;
-//! let h = ClassicalPoly::<f32>::new(vec![4., 2., 3., -1.]);
+//! type CP = ClassicalPoly<f32>;
+//! let h = CP::new(vec![4., 2., 3., -1.]);
 //! assert_eq!(h.eval(&0.), Ok(4.));
 //! assert_eq!(h.eval(&1.), Ok(8.));
 //! assert_eq!(h.eval(&-1.), Ok(6.));
-//! assert_eq!(h.mp_eval([0.,1.,-1.].iter().copied()).unwrap(), [4.,8.,6.]);
+//! let eval_info = CP::mp_eval_prep([0., 1., -1.].iter().copied());
+//! assert_eq!(h.mp_eval(&eval_info).unwrap(), [4.,8.,6.]);
 //! ```
-//!
-//! If the same evaluation points are used for multiple polynomials,
-//! they can be preprocessed with [`Poly::mp_eval_prep()`], and then
-//! replacing [`Poly::mp_eval()`] with [`Poly::mp_eval_post()`] will
-//! be more efficient overall.
 //!
 //! # Sparse interpolation
 //!
@@ -70,20 +67,16 @@
 //!
 //! ```
 //! # use sparse_interp::{ClassicalPoly, RelativeParams};
-//! let f = ClassicalPoly::new(vec![0., -2.5, 0., 0., 0., 7.1]);
+//! type CP = ClassicalPoly<f64>;
+//! let f = CP::new(vec![0., -2.5, 0., 0., 0., 7.1]);
 //! let t = 2;
-//! let theta = 1.8f64;
-//! let eval_pts = [1., theta, theta.powi(2), theta.powi(3)];
-//! let evals = f.mp_eval(eval_pts.iter().copied()).unwrap();
-//! let error = 0.001;
-//! let mut result = ClassicalPoly::sparse_interp(
-//!     &theta,    // evaluation base point
-//!     t,         // upper bound on nonzero terms
-//!     0..8,      // iteration over possible exponents
-//!     &evals,    // evaluations at powers of theta
-//!     &RelativeParams::<f64>::new(Some(error), Some(error))
-//!                // needed for approximate types like f64
-//! ).unwrap();
+//! let (eval_info, interp_info) = ClassicalPoly::sparse_interp_prep(
+//!     t,          // upper bound on nonzero terms
+//!     0..8,       // iteration over possible exponents
+//!     &f64::MAX,  // upper bound on coefficient magnitude
+//! );
+//! let evals = f.mp_eval(&eval_info).unwrap();
+//! let mut result = CP::sparse_interp(&evals, &interp_info).unwrap();
 //!
 //! // round the coefficients to nearest 0.1
 //! for (_,c) in result.iter_mut() {
@@ -97,7 +90,6 @@ use core::{
     ops::{
         Add,
         Mul,
-        Neg,
         AddAssign,
         SubAssign,
         MulAssign,
@@ -119,7 +111,6 @@ use core::{
     convert::{
         self,
     },
-    slice,
 };
 use num_traits::{
     Zero,
@@ -128,6 +119,7 @@ use num_traits::{
 };
 use num_complex::{
     Complex,
+    Complex32,
     Complex64,
 };
 use custom_error::custom_error;
@@ -339,7 +331,8 @@ macro_rules! two_way_complex {
 
                 #[inline(always)]
                 fn one_way(src: Self::Source) -> Result<Self::Dest> {
-                    DefConv::<$t,$us>::one_way(src.norm())
+                    // TODO maybe return Err if imaginary part is too large?
+                    DefConv::<$t,$us>::one_way(src.re)
                 }
             }
         )+
@@ -440,24 +433,24 @@ pub struct RelativeParams<T, E=T>
 }
 
 macro_rules! impl_relative_params {
-    ($T:ident, $E:ident) => {
-        impl RelativeParams<$T,$E> {
+    ($t:ident, $e:ident, $norm:ident) => {
+        impl RelativeParams<$t,$e> {
             /// Create a new closeness tester with the given parameters.
             ///
             /// For both arguments, `zero_thresh` and `max_relative`,
             /// either the given bound is used, or machine epsilon if the argument
             /// is `None`.
             #[inline(always)]
-            pub fn new(zero_thresh: Option<$E>, max_relative: Option<$E>) -> Self {
+            pub fn new(zero_thresh: Option<$e>, max_relative: Option<$e>) -> Self {
                 Self {
-                    zero_thresh: zero_thresh.unwrap_or($E::EPSILON),
-                    max_relative: max_relative.unwrap_or($E::EPSILON),
+                    zero_thresh: zero_thresh.unwrap_or($e::EPSILON),
+                    max_relative: max_relative.unwrap_or($e::EPSILON),
                     phantom: PhantomData,
                 }
             }
         }
 
-        impl Default for RelativeParams<$T,$E> {
+        impl Default for RelativeParams<$t,$e> {
             /// Create a closeness tester with machine epsilon precision.
             #[inline(always)]
             fn default() -> Self {
@@ -465,20 +458,20 @@ macro_rules! impl_relative_params {
             }
         }
 
-        impl CloseTo for RelativeParams<$T,$E> {
-            type Item = $T;
+        impl CloseTo for RelativeParams<$t,$e> {
+            type Item = $t;
 
             #[inline]
             fn close_to(&self, x: &Self::Item, y: &Self::Item) -> bool {
                 if x == y {
                     return true
                 };
-                if $T::is_infinite(*x) || $T::is_infinite(*y) {
+                if $t::is_infinite(*x) || $t::is_infinite(*y) {
                     return false
                 };
 
-                let absx = $T::abs(*x);
-                let absy = $T::abs(*y);
+                let absx = $t::$norm(*x);
+                let absy = $t::$norm(*y);
 
                 let largest = if absx <= absy {
                     absy
@@ -489,20 +482,22 @@ macro_rules! impl_relative_params {
                 if largest <= self.zero_thresh {
                     true
                 } else {
-                    $T::abs(x - y) / largest <= self.max_relative
+                    $t::$norm(x - y) / largest <= self.max_relative
                 }
             }
 
             #[inline(always)]
             fn close_to_zero(&self, x: &Self::Item) -> bool {
-                $T::abs(*x) <= self.zero_thresh
+                $t::$norm(*x) <= self.zero_thresh
             }
         }
     };
 }
 
-impl_relative_params!(f32, f32);
-impl_relative_params!(f64, f64);
+impl_relative_params!(f32, f32, abs);
+impl_relative_params!(f64, f64, abs);
+impl_relative_params!(Complex32, f32, norm);
+impl_relative_params!(Complex64, f64, norm);
 
 /// Algorithms to enable polynomial arithmetic.
 ///
@@ -613,15 +608,10 @@ pub trait PolyTraits {
         -> (<Self::SparseInterpEval as EvalTypes>::EvalInfo, Self::SparseInterpInfo)
     ;
 
-    /// Sparse interpolation from special evaluation points.
+    /// Sparse interpolation following evaluation.
     ///
-    /// The points in `eval` should correspond to the requirements in
+    /// The evaluations in `eval` should correspond to what was specified by
     /// [`Self::sparse_interp_prep()`].
-    ///
-    /// In addition the provided [`CloseTo`] impl works for the underlying sparse interpolation
-    /// algorithm. For exact fields, [`CloseToEq`] should always work. For inexact
-    /// fields such as [`f64`], [`RelativeParams`] should work, but some understanding
-    /// of the trait's sparse interpolation algorithm may be required to ensure accuracy.
     ///
     /// If those requirements are met, the function will return Some(..) containing
     /// a list of exponent-coefficient pairs, sorted in ascending order of exponents.
@@ -629,25 +619,8 @@ pub trait PolyTraits {
     /// Otherwise, for example if the evaluated function has more non-zero terms
     /// than the pre-specified limit, this function *may* return None or may return
     /// Some(..) with incorrect values.
-    ///
-    /// ```
-    /// # use sparse_interp::*;
-    /// # type TraitImpl = ClassicalTraits<f32>;
-    /// let f :[f32; 8] = [0., 0., -18.5, 0., 0., 0., 0., 31.7];
-    /// let theta: f32 = 2.1;
-    /// let eval_pts :Vec<_> = (0..4).map(|d| theta.powi(d)).collect();
-    /// let evals :Vec<_> = eval_pts.iter().map(|x| f[2] * x.powi(2) + f[7] * x.powi(7)).collect();
-    /// let close_check = RelativeParams::<f32>::new(Some(0.1), Some(0.1));
-    ///
-    /// let sp_info = TraitImpl::sparse_interp_prep(&theta, 2, 0..10);
-    /// let sp_result = TraitImpl::sparse_interp_slice(&evals, &sp_info, &close_check).unwrap();
-    /// assert_eq!(sp_result.len(), 2);
-    /// assert_eq!(sp_result[0].0, 2);
-    /// assert!(close_check.close_to(&sp_result[0].1, &f[2]));
-    /// assert_eq!(sp_result[1].0, 7);
-    /// assert!(close_check.close_to(&sp_result[1].1, &f[7]));
-    /// ```
-    fn sparse_interp_slice(evals: &[Self::Coeff], info: &Self::SparseInterpInfo, close: &impl CloseTo<Item=Self::Coeff>)
+    fn sparse_interp_slice(evals: &[<Self::SparseInterpEval as EvalTypes>::Eval],
+                           info: &Self::SparseInterpInfo)
         -> Result<Vec<(usize, Self::Coeff)>>;
 }
 
@@ -742,70 +715,67 @@ where C: Clone,
 #[derive(Debug,Default,Clone,Copy,PartialEq,Eq)]
 pub struct ClassicalTraits<C>(PhantomData<C>);
 
+// FIXME remove
+fn at_a_loss(x: &Vec<Complex64>, y: &Complex64) -> Result<Complex64> {
+    horner_eval(x.iter(), y)
+}
+
 impl<C> PolyTraits for ClassicalTraits<C>
-where C: Clone + Zero + One + Neg<Output=C> + Mul<Output=C>
-        + AddAssign + SubAssign + MulAssign + Inv<Output=C>,
+where C: Clone + Mul<Output=C> + AddAssign,
       DefConv<C, Complex64>: TwoWay<Source=C, Dest=Complex64>,
 {
     type Coeff = C;
     type SparseInterpEval = EvalTrait<Self, Complex64>;
-    type SparseInterpInfo = (usize, Vec<(usize, Complex64)>);
+    type SparseInterpInfo = (usize, Vec<(usize, Complex64)>, RelativeParams<Complex64, f64>);
 
     #[inline(always)]
     fn slice_mul(out: &mut [Self::Coeff], lhs: &[Self::Coeff], rhs: &[Self::Coeff]) {
         classical_slice_mul(out, lhs, rhs);
     }
 
-    fn sparse_interp_prep(sparsity: usize, expons: impl Iterator<Item=usize>, max_coeff: &Self::Coeff)
+    fn sparse_interp_prep(sparsity: usize, expons: impl Iterator<Item=usize>, _max_coeff: &Self::Coeff)
         -> (<Self::SparseInterpEval as EvalTypes>::EvalInfo, Self::SparseInterpInfo)
     {
         let mut theta_pows: Vec<_> = expons.map(|d| (d, Complex64::default())).collect();
         let theta = match theta_pows.iter().map(|pair| pair.0).max() {
-            Some(max_pow) => Complex64::from_polar(1., 2.*core::f64::consts::PI / (max_pow as f64)),
+            Some(max_pow) => Complex64::from_polar(1., 2.*core::f64::consts::PI / (max_pow as f64 + 1.)),
             None => Complex64::default(),
         };
         for (ref expon, ref mut power) in theta_pows.iter_mut() {
             *power = theta.powu(*expon as u32);
         }
-        let max_pow = theta_pows.iter().map(|pair| pair.0).max();
         (EvalTrait::<Self, Complex64>::prep((0..2*sparsity).map(|e| theta.powu(e as u32))),
-         (sparsity, theta_pows)
+         (sparsity, theta_pows, RelativeParams::<Complex64,f64>::new(Some(1e-10), Some(1e-10))) //TODO how to choose approx params
         )
     }
 
     fn sparse_interp_slice(
-        evals: &[Self::Coeff],
+        evals: &[Complex64],
         info: &Self::SparseInterpInfo,
-        close: &impl CloseTo<Item=Self::Coeff>,
         ) -> Result<Vec<(usize, Self::Coeff)>>
     {
-        assert_eq!(evals.len(), 2*info.0);
+        let (sparsity, pows, close) = info;
+        assert_eq!(evals.len(), 2*sparsity);
         let mut lambda = bad_berlekamp_massey(evals, close)?;
-        lambda.push(-C::one());
-        let (degs, roots): (Vec<usize>, Vec<&C>) = info.1.iter().filter_map(
-            |(deg, rootpow)|
-            horner_eval(lambda.iter(), rootpow).ok().and_then(
+        lambda.push(Complex64::from(-1.));
+        let (degs, roots): (Vec<usize>, Vec<Complex64>) = pows.iter().filter_map(
+            |(deg, rootpow)| {
+            // FIXME why helper function is needed?
+            //horner_eval(lambda.iter(), rootpow).ok().and_then(
+            at_a_loss(&lambda, rootpow).ok().and_then(
                 |eval| match close.close_to_zero(&eval) {
                     true => Some((deg, rootpow)),
                     false => None,
                 }
-            )
+            )}
         ).unzip();
         if degs.len() != lambda.len() - 1 {
             Err(Error::MissingExponents)
         } else {
-            // Note, seems dumb I had to do this just to turn &&C into &C, but alas...
-            struct IterHolder<'a,T>(Vec<&'a T>);
-            impl<'a,T> IntoIterator for &'a IterHolder<'a, T> {
-                type Item = &'a T;
-                type IntoIter = iter::Copied<slice::Iter<'a, &'a T>>;
-                fn into_iter(self) -> Self::IntoIter {
-                    self.0.iter().copied()
-                }
-            }
             let evslice = &evals[..degs.len()];
             Ok(degs.into_iter().zip(
-                bad_trans_vand_solve(&IterHolder(roots), evslice, close)?.into_iter()
+                bad_trans_vand_solve(&roots, evslice, close)?.into_iter()
+                    .map(|c| DefConv::<C,Complex64>::other_way(c).unwrap()) // FIXME avoid unwrap
             ).collect())
         }
     }
@@ -989,33 +959,20 @@ where U: PolyTraits,
         U::mp_eval_prep(pts)
     }
 
-    /// Perform multi-point evaluation after pre-processing.
-    ///
-    /// `info` should be the result of calling [`Self::mp_eval_prep()`].
-    #[inline]
-    pub fn mp_eval_post<V>(&self, info: &<EvalTrait<U,V> as EvalTypes>::EvalInfo) -> Result<Vec<V>>
-    where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
-    {
-        let mut out = Vec::new();
-        U::mp_eval_slice(&mut out, self.rep.borrow(), info)?;
-        Ok(out)
-    }
-
     /// Evaluate this polynomial at all of the given points.
     ///
     /// Performs multi-point evaluation using the underlying trait algorithms.
     /// In general, this can be much more efficient than repeatedly calling
     /// [`self.eval()`].
     ///
-    /// If different polynomials will repeatedly be evaluated at the same set
-    /// of points, consider using the pre- and post-processed versions
-    /// [`Self::mp_eval_prep()`] and [`self.mp_eval_post()`] instead for even
-    /// greater efficiency.
-    #[inline(always)]
-    pub fn mp_eval<V>(&self, pts: impl Iterator<Item=V>) -> Result<Vec<V>>
+    /// `info` should be the result of calling [`Self::mp_eval_prep()`].
+    #[inline]
+    pub fn mp_eval<V>(&self, info: &<EvalTrait<U,V> as EvalTypes>::EvalInfo) -> Result<Vec<V>>
     where EvalTrait<U, V>: EvalTypes<Coeff=U::Coeff, Eval=V>,
     {
-        self.mp_eval_post(&Self::mp_eval_prep(pts))
+        let mut out = Vec::new();
+        U::mp_eval_slice(&mut out, self.rep.borrow(), info)?;
+        Ok(out)
     }
 }
 
@@ -1024,61 +981,39 @@ where U: PolyTraits,
 {
     /// Perform pre-processing for sparse interpolation.
     ///
-    /// *   Evaluations will be at consecutive powers of `theta`.
     /// *   `sparsity` is an upper bound on the number of nonzero terms in the evaluated
     ///     polynomial.
     /// *   `expons` is an iteration over the possible exponents which may appear in nonzero
     ///     terms.
+    /// *   `max_coeff` is an upper bound on the magnitude of any coefficient.
     ///
     /// See [`PolyTraits::sparse_interp_prep()`] for more details.
     #[inline(always)]
-    pub fn sparse_interp_prep(theta: &U::Coeff, sparsity: usize, expons: impl Iterator<Item=usize>)
-        -> U::SparseInterpInfo
+    pub fn sparse_interp_prep(sparsity: usize, expons: impl Iterator<Item=usize>, max_coeff: &U::Coeff)
+        -> (<U::SparseInterpEval as EvalTypes>::EvalInfo, U::SparseInterpInfo)
     {
-        U::sparse_interp_prep(theta, sparsity, expons)
+        U::sparse_interp_prep(sparsity, expons, max_coeff)
     }
 
-    /// Perform sparse interpolation after pre-processing.
+    /// Perform sparse interpolation after evaluation.
     ///
-    /// *   `evals` should correspond to evaluations of some unknown power
+    /// Beforehand, [`Self::sparse_interp_prep()`] must be called to generate two info
+    /// structs for evaluation and interpolation. These can be used repeatedly to
+    /// evaluate and interpolate many polynomials with the same sparsity and degree
+    /// bounds.
+    ///
+    /// *   `evals` should correspond evaluations according to the `EvalInfo` struct
+    ///     returned from preprocessing.
     ///     at consecutive powers of the `theta` used in preprocessing.
-    /// *   `info` should be the result of calling [`Self::sparse_interp_prep()`].
-    /// *   The parameters for `close` depend on the underlying field and the trait's interpolation
-    ///     algorithm.
+    /// *   `info` should come from a previous call to [`Self::sparse_interp_prep()`].
     ///
     /// On success, a vector of (exponent, nonzero coefficient) pairs is returned,
     /// sorted by increasing exponent values.
     #[inline(always)]
-    pub fn sparse_interp_post(evals: &[U::Coeff], info: &U::SparseInterpInfo, close: &impl CloseTo<Item=U::Coeff>)
+    pub fn sparse_interp(evals: &[<U::SparseInterpEval as EvalTypes>::Eval], info: &U::SparseInterpInfo)
         -> Result<Vec<(usize, U::Coeff)>>
     {
-        U::sparse_interp_slice(evals, info, close)
-    }
-
-    /// Perform sparse interpolation.
-    ///
-    /// *   Evaluations will be at consecutive powers of `theta`.
-    /// *   `sparsity` is an upper bound on the number of nonzero terms in the evaluated
-    ///     polynomial.
-    /// *   `expons` is an iteration over the possible exponents which may appear in nonzero
-    ///     terms.
-    /// *   `evals` should correspond to evaluations of some unknown power
-    ///     at consecutive powers of the `theta` used in preprocessing.
-    /// *   The parameters for `close` depend on the underlying field and the trait's interpolation
-    ///     algorithm.
-    ///
-    /// On success, a vector of (exponent, nonzero coefficient) pairs is returned,
-    /// sorted by increasing exponent values.
-    /// #[inline(always)]
-    pub fn sparse_interp(
-        theta: &U::Coeff,
-        sparsity: usize,
-        expons: impl Iterator<Item=usize>,
-        evals: &[U::Coeff],
-        close: &impl CloseTo<Item=U::Coeff>)
-        -> Result<Vec<(usize, U::Coeff)>>
-    {
-        Self::sparse_interp_post(evals, &U::sparse_interp_prep(theta, sparsity, expons), close)
+        U::sparse_interp_slice(evals, info)
     }
 }
 
@@ -1250,9 +1185,20 @@ where T: 'a + Clone,
     }
 }
 
-// see also: https://docs.rs/num-traits/0.2.14/src/num_traits/pow.rs.html#189-211
+/// Computes base^exp, where the base is a reference and not an owned value.
+///
+/// The number of clones is kept to a minimum. This is useful when objects of type T
+/// are large and copying them is expensive.
+///
+/// ```
+/// # use sparse_interp::refpow;
+/// let x = 10u128;
+/// assert_eq!(refpow(&x, 11), 100000000000u128)
+/// ```
+///
+/// see also: <https://docs.rs/num-traits/0.2.14/src/num_traits/pow.rs.html#189-211>
 #[inline]
-fn refpow<T>(base: &T, exp: usize) -> T
+pub fn refpow<T>(base: &T, exp: usize) -> T
 where T: Clone + One + Mul<Output=T> + MulAssign,
 {
     match exp {
@@ -1441,9 +1387,6 @@ impl<I,E> ErrorIter<I,E> {
 
 #[cfg(test)]
 mod tests {
-    use num_rational::{
-        Rational32,
-    };
     use super::*;
 
     #[test]
@@ -1490,12 +1433,9 @@ mod tests {
 
     #[test]
     fn add() {
-        let a: Vec<_> = [10, 20, 30, 40]
-            .iter().copied().map(Rational32::from_integer).collect();
-        let b: Vec<_> = [3, 4, 5]
-            .iter().copied().map(Rational32::from_integer).collect();
-        let c: Vec<_> = [13, 24, 35, 40]
-            .iter().copied().map(Rational32::from_integer).collect();
+        let a = vec![10, 20, 30, 40];
+        let b = vec![3, 4, 5];
+        let c = vec![13, 24, 35, 40];
 
         let ap: ClassicalPoly<_> = a.iter().copied().collect();
         let bp: ClassicalPoly<_> = b.iter().copied().collect();
@@ -1506,12 +1446,9 @@ mod tests {
 
     #[test]
     fn mul() {
-        let a: Vec<_> = [1, 2, 3, 4, 5]
-            .iter().copied().map(Rational32::from_integer).collect();
-        let b: Vec<_> = [300, 4, 50000]
-            .iter().copied().map(Rational32::from_integer).collect();
-        let c: Vec<_> = [300, 604, 50908, 101212, 151516, 200020, 250000]
-            .iter().copied().map(Rational32::from_integer).collect();
+        let a = vec![1, 2, 3, 4, 5];
+        let b = vec![300, 4, 50000];
+        let c = vec![300, 604, 50908, 101212, 151516, 200020, 250000];
 
         let ap: ClassicalPoly<_> = a.iter().copied().collect();
         let bp: ClassicalPoly<_> = b.iter().copied().collect();
@@ -1523,13 +1460,15 @@ mod tests {
 
     #[test]
     fn eval() {
-        let f: ClassicalPoly<_> = [-5,3,-1,2].iter().copied().map(Rational32::from_integer).collect();
+        type CP = ClassicalPoly<i16>;
+        let f = CP::new(vec![-5,3,-1,2]);
 
-        assert_eq!(f.eval(&Rational32::from_integer(-3)),
-            Ok(Rational32::from_integer(-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3)));
+        assert_eq!(f.eval(&-3.0f32),
+            Ok((-5 + 3*-3 + -1*-3*-3 + 2*-3*-3*-3) as f32));
         {
-            let pts: Vec<_> = [-2,0,7].iter().copied().map(Rational32::from_integer).collect();
-            assert!(f.mp_eval(pts.iter().copied()).unwrap().into_iter().eq(
+            let pts = vec![-2,0,7];
+            let prep = CP::mp_eval_prep(pts.iter().copied());
+            assert!(f.mp_eval(&prep).unwrap().into_iter().eq(
                 pts.iter().map(|x| f.eval(x).unwrap())));
         }
     }
@@ -1548,39 +1487,15 @@ mod tests {
         }
     }
 
-    // XXX available in nightly as part of Iterator
-    fn eq_by<T,U,F>(mut a: T, mut b: U, mut eq: F) -> bool
-    where T: Iterator,
-          U: Iterator,
-          F: FnMut(T::Item, U::Item) -> bool,
-    {
-        loop {
-            match a.next() {
-                Some(x) => match b.next() {
-                    Some(y) => if ! eq(x,y) {
-                        return false;
-                    },
-                    None => return false,
-                },
-                None => return b.next().is_none(),
-            };
-        }
-    }
-
     #[test]
     fn classical_sparse_interp() {
-        let f: ClassicalPoly<_> = vec![3., 0., -2., 0., 0., 0., -1.].into_iter().collect();
-        let theta = 1.2f64;
+        type CP = ClassicalPoly<i32>;
+        let f = CP::new(vec![3, 0, -2, 0, 0, 0, -1]);
         let t = 3;
-        let xs: Vec<_> = (0..2*t).map(|i| theta.powi(i as i32)).collect();
-        let ys = f.mp_eval(xs.iter().copied()).unwrap();
-        let eq_test = RelativeParams::<f64>::new(Some(0.00000001), Some(0.00000001));
-        let expected_sparse = f.rep.iter().enumerate().filter(|(_,c)| **c != 0.);
-        // sparse interpolation starts here
-        let si_info = ClassicalPoly::sparse_interp_prep(&theta, t, 0..10);
-        let sparse_f = ClassicalPoly::sparse_interp_post(&ys, &si_info, &eq_test).expect("sparse interp failed");
-        assert!(eq_by(sparse_f.iter(), expected_sparse,
-            |(d1,c1), (d2,c2)| *d1 == d2 && eq_test.close_to(c1, c2)
-            ));
+        let (eval_info, interp_info) = CP::sparse_interp_prep(t, 0..10, &100);
+        let evals = f.mp_eval(&eval_info).unwrap();
+        let expected_sparse: Vec<_> = f.rep.iter().enumerate().filter(|(_,c)| **c != 0).map(|(e,c)| (e,*c)).collect();
+        let sparse_f = CP::sparse_interp(&evals, &interp_info).unwrap();
+        assert_eq!(expected_sparse, sparse_f);
     }
 }
