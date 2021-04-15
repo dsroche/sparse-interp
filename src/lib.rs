@@ -116,7 +116,9 @@ use core::{
     marker::{
         PhantomData,
     },
-    convert,
+    convert::{
+        self,
+    },
     slice,
 };
 use num_traits::{
@@ -124,8 +126,8 @@ use num_traits::{
     One,
     Inv,
 };
-use conv::{
-    ApproxInto,
+use num_complex::{
+    Complex,
 };
 use custom_error::custom_error;
 
@@ -134,7 +136,7 @@ custom_error!{
     #[derive(PartialEq)]
     #[allow(missing_docs)]
     pub Error
-        FromCoeff{cause: String}
+        CoeffConv{cause: String}
             = "Could not convert coefficient: {cause}",
         Singular = "Encountered singular matrix when expecting nonsingular; perhaps sparsity was set too low",
         MissingExponents = "The exponent of a non-zero term was missing from the list",
@@ -142,6 +144,366 @@ custom_error!{
 
 /// A specialized [core::result::Result] type for sparse interpolation.
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// A trait for 1-way conversions between numeric types that may fail.
+///
+/// Provides basically the same functionality as [`std::convert::TryFrom`]
+/// from `std`, but a new trait was needed in order to implement it for
+/// conversions such as `f64` to `u32`, or
+/// [`num_complex::Complex32`] to `f32`.
+///
+/// See also the [conv crate](https://crates.io/crates/conv), which was
+/// also considered but cannot be used here because it is not compatible
+/// with [`num_complex::Complex32`].
+pub trait OneWay {
+    /// The type being converted from.
+    type Source;
+    /// The type being converted to.
+    type Dest;
+    /// Conversion from Source to Dest that may fail.
+    fn one_way(src: Self::Source) -> Result<Self::Dest>;
+}
+
+/// A trait for 2-way conversions that may fail.
+///
+/// Of course, for any `x: Source`, it should be the case that
+/// `other_way(one_way(x)?)? == x` when possible, but this is not
+/// required.
+pub trait TwoWay: OneWay {
+    /// Conversion from Dest to Source that may fail.
+    fn other_way(src: <Self as OneWay>::Dest) -> Result<<Self as OneWay>::Source>;
+}
+
+/// The default conversion from S to D, if it exists.
+#[derive(Debug)]
+pub struct DefConv<S,D>(PhantomData<(S,D)>);
+
+impl<S,D> TwoWay for DefConv<S,D>
+where Self: OneWay<Source=S, Dest=D>,
+      DefConv<D,S>: OneWay<Source=D, Dest=S>,
+{
+    fn other_way(src: D) -> Result<S> {
+        <DefConv<D,S> as OneWay>::one_way(src)
+    }
+}
+
+impl<S> OneWay for DefConv<S,S>
+{
+    type Source = S;
+    type Dest = S;
+
+    #[inline(always)]
+    fn one_way(src: S) -> Result<S> {
+        Ok(src)
+    }
+}
+
+macro_rules! one_way_as {
+    ($S:ty, $D:ty) => {
+        impl OneWay for DefConv<$S,$D> {
+            type Source = $S;
+            type Dest = $D;
+            fn one_way(src: $S) -> Result<$D> {
+                Ok(src as $D)
+            }
+        }
+    }
+}
+
+macro_rules! one_way_as_check {
+    ($S:ty, $D:ty) => {
+        impl OneWay for DefConv<$S,$D> {
+            type Source = $S;
+            type Dest = $D;
+            fn one_way(src: $S) -> Result<$D> {
+                let dest = src as $D;
+                if (dest as $S) == src {
+                    Ok(dest)
+                } else {
+                    Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($D))})
+                }
+            }
+        }
+    }
+}
+
+macro_rules! one_way_round {
+    ($S:ty, $D:ty) => {
+        impl OneWay for DefConv<$S,$D> {
+            type Source = $S;
+            type Dest = $D;
+            fn one_way(src: $S) -> Result<$D> {
+                let rounded = src.round();
+                let dest = rounded as $D;
+                if (dest as $S) == rounded {
+                    Ok(dest)
+                } else {
+                    Err(Error::CoeffConv{cause: format!("{} not representable as {}", src, stringify!($D))})
+                }
+            }
+        }
+    }
+}
+
+macro_rules! one_way_try {
+    ($S:ty, $D:ty) => {
+        impl OneWay for DefConv<$S,$D> {
+            type Source = $S;
+            type Dest = $D;
+            fn one_way(src: $S) -> Result<$D> {
+                convert::TryInto::<$D>::try_into(src).map_err(|e| Error::CoeffConv{cause: e.to_string()})
+            }
+        }
+    }
+}
+
+//one_way_as!(i8, i8);
+one_way_try!(i8, u8);
+one_way_as!(i8, i16);
+one_way_as!(i8, u16);
+one_way_as!(i8, i32);
+one_way_as!(i8, u32);
+one_way_as!(i8, i64);
+one_way_as!(i8, u64);
+one_way_as!(i8, i128);
+one_way_as!(i8, u128);
+one_way_as!(i8, isize);
+one_way_as!(i8, usize);
+one_way_as!(i8, f32);
+one_way_as!(i8, f64);
+
+one_way_try!(u8, i8);
+//one_way_as!(u8, u8);
+one_way_as!(u8, i16);
+one_way_as!(u8, u16);
+one_way_as!(u8, i32);
+one_way_as!(u8, u32);
+one_way_as!(u8, i64);
+one_way_as!(u8, u64);
+one_way_as!(u8, i128);
+one_way_as!(u8, u128);
+one_way_as!(u8, isize);
+one_way_as!(u8, usize);
+one_way_as!(u8, f32);
+one_way_as!(u8, f64);
+
+one_way_try!(i16, i8);
+one_way_try!(i16, u8);
+//one_way_as!(i16, i16);
+one_way_try!(i16, u16);
+one_way_as!(i16, i32);
+one_way_as!(i16, u32);
+one_way_as!(i16, i64);
+one_way_as!(i16, u64);
+one_way_as!(i16, i128);
+one_way_as!(i16, u128);
+one_way_as!(i16, isize);
+one_way_as!(i16, usize);
+one_way_as!(i16, f32);
+one_way_as!(i16, f64);
+
+one_way_try!(u16, i8);
+one_way_try!(u16, u8);
+one_way_try!(u16, i16);
+//one_way_as!(u16, u16);
+one_way_as!(u16, i32);
+one_way_as!(u16, u32);
+one_way_as!(u16, i64);
+one_way_as!(u16, u64);
+one_way_as!(u16, i128);
+one_way_as!(u16, u128);
+one_way_as!(u16, isize);
+one_way_as!(u16, usize);
+one_way_as!(u16, f32);
+one_way_as!(u16, f64);
+
+one_way_try!(i32, i8);
+one_way_try!(i32, u8);
+one_way_try!(i32, i16);
+one_way_try!(i32, u16);
+//one_way_as!(i32, i32);
+one_way_try!(i32, u32);
+one_way_as!(i32, i64);
+one_way_as!(i32, u64);
+one_way_as!(i32, i128);
+one_way_as!(i32, u128);
+one_way_as!(i32, isize);
+one_way_try!(i32, usize);
+one_way_as_check!(i32, f32);
+one_way_as!(i32, f64);
+
+one_way_try!(u32, i8);
+one_way_try!(u32, u8);
+one_way_try!(u32, i16);
+one_way_try!(u32, u16);
+one_way_try!(u32, i32);
+//one_way_as!(u32, u32);
+one_way_as!(u32, i64);
+one_way_as!(u32, u64);
+one_way_as!(u32, i128);
+one_way_as!(u32, u128);
+one_way_try!(u32, isize);
+one_way_as!(u32, usize);
+one_way_as_check!(u32, f32);
+one_way_as!(u32, f64);
+
+one_way_try!(i64, i8);
+one_way_try!(i64, u8);
+one_way_try!(i64, i16);
+one_way_try!(i64, u16);
+one_way_try!(i64, i32);
+one_way_try!(i64, u32);
+//one_way_as!(i64, i64);
+one_way_try!(i64, u64);
+one_way_as!(i64, i128);
+one_way_as!(i64, u128);
+one_way_try!(i64, isize);
+one_way_try!(i64, usize);
+one_way_as_check!(i64, f32);
+one_way_as_check!(i64, f64);
+
+one_way_try!(u64, i8);
+one_way_try!(u64, u8);
+one_way_try!(u64, i16);
+one_way_try!(u64, u16);
+one_way_try!(u64, i32);
+one_way_try!(u64, u32);
+one_way_try!(u64, i64);
+//one_way_as!(u64, u64);
+one_way_as!(u64, i128);
+one_way_as!(u64, u128);
+one_way_try!(u64, isize);
+one_way_try!(u64, usize);
+one_way_as_check!(u64, f32);
+one_way_as_check!(u64, f64);
+
+one_way_try!(i128, i8);
+one_way_try!(i128, u8);
+one_way_try!(i128, i16);
+one_way_try!(i128, u16);
+one_way_try!(i128, i32);
+one_way_try!(i128, u32);
+one_way_try!(i128, i64);
+one_way_try!(i128, u64);
+//one_way_as!(i128, i128);
+one_way_try!(i128, u128);
+one_way_try!(i128, isize);
+one_way_try!(i128, usize);
+one_way_as_check!(i128, f32);
+one_way_as_check!(i128, f64);
+
+one_way_try!(u128, i8);
+one_way_try!(u128, u8);
+one_way_try!(u128, i16);
+one_way_try!(u128, u16);
+one_way_try!(u128, i32);
+one_way_try!(u128, u32);
+one_way_try!(u128, i64);
+one_way_try!(u128, u64);
+one_way_try!(u128, i128);
+//one_way_as!(u128, u128);
+one_way_try!(u128, isize);
+one_way_try!(u128, usize);
+one_way_as_check!(u128, f32);
+one_way_as_check!(u128, f64);
+
+one_way_try!(isize, i8);
+one_way_try!(isize, u8);
+one_way_try!(isize, i16);
+one_way_try!(isize, u16);
+one_way_try!(isize, i32);
+one_way_try!(isize, u32);
+one_way_try!(isize, i64);
+one_way_try!(isize, u64);
+one_way_try!(isize, i128);
+one_way_try!(isize, u128);
+//one_way_as!(isize, isize);
+one_way_try!(isize, usize);
+one_way_as_check!(isize, f32);
+one_way_as_check!(isize, f64);
+
+one_way_try!(usize, i8);
+one_way_try!(usize, u8);
+one_way_try!(usize, i16);
+one_way_try!(usize, u16);
+one_way_try!(usize, i32);
+one_way_try!(usize, u32);
+one_way_try!(usize, i64);
+one_way_try!(usize, u64);
+one_way_try!(usize, i128);
+one_way_try!(usize, u128);
+one_way_try!(usize, isize);
+//one_way_as!(usize, usize);
+one_way_as_check!(usize, f32);
+one_way_as_check!(usize, f64);
+
+one_way_round!(f32, i8);
+one_way_round!(f32, u8);
+one_way_round!(f32, i16);
+one_way_round!(f32, u16);
+one_way_round!(f32, i32);
+one_way_round!(f32, u32);
+one_way_round!(f32, i64);
+one_way_round!(f32, u64);
+one_way_round!(f32, i128);
+one_way_round!(f32, u128);
+one_way_round!(f32, isize);
+one_way_round!(f32, usize);
+one_way_as!(f32, f64);
+
+one_way_round!(f64, i8);
+one_way_round!(f64, u8);
+one_way_round!(f64, i16);
+one_way_round!(f64, u16);
+one_way_round!(f64, i32);
+one_way_round!(f64, u32);
+one_way_round!(f64, i64);
+one_way_round!(f64, u64);
+one_way_round!(f64, i128);
+one_way_round!(f64, u128);
+one_way_round!(f64, isize);
+one_way_round!(f64, usize);
+
+impl OneWay for DefConv<f64, f32> {
+    type Source = f64;
+    type Dest = f32;
+
+    fn one_way(src: f64) -> Result<f32> {
+        let dest = src as f32;
+        if dest.log2().round() == (src.log2().round() as f32) {
+            Ok(dest)
+        } else {
+            Err(Error::CoeffConv{cause: format!("f64->f32 exponent overflow on {}", src)})
+        }
+    }
+}
+
+/* TODO
+impl<S,T> OneWay for DefConv<S, Complex<T>>
+where DefConv<S, T>: OneWay<Source=S, Dest=T>
+{
+    type Source = S;
+    type Dest = Complex<T>;
+
+    #[inline(always)]
+    fn one_way(src: S) -> Result<Complex<T>> {
+        Ok(Complex::<T>::from(DefConv::<S,T>::one_way(src)?))
+    }
+}
+
+impl<D> OneWay for DefConv<Complex64, D>
+where DefConv<f64, D>: OneWay<Source=f64, Dest=D>
+{
+    type Source = Complex64;
+    type Dest = D;
+
+    #[inline(always)]
+    fn one_way(src: Complex64) -> Result<D> {
+        DefConv::<f64,D>::one_way(src.norm())
+    }
+}
+*/
+
 
 /// A possibly-stateful comparison for exact or approximate types.
 ///
@@ -500,8 +862,9 @@ pub trait EvalTypes {
 }
 
 impl<C,U> EvalTypes for EvalTrait<ClassicalTraits<C>, U>
-where C: Clone + ApproxInto<U>,
+where C: Clone,
       U: Clone + Zero + MulAssign + AddAssign,
+      DefConv<C,U>: OneWay<Source=C, Dest=U>,
 {
     type Coeff = C;
     type Eval = U;
@@ -1013,16 +1376,15 @@ where T: Clone + Mul<Output=T> + AddAssign,
 
 fn horner_eval<'a,'b,T,U>(mut coeffs: impl DoubleEndedIterator<Item=&'a T>, x: &'b U)
     -> Result<U>
-where T: 'a + Clone + ApproxInto<U>,
+where T: 'a + Clone,
       U: Clone + Zero + MulAssign + AddAssign,
+      DefConv<T,U>: OneWay<Source=T, Dest=U>,
 {
     if let Some(leading) = coeffs.next_back() {
-        let mut out = leading.clone().approx_into()
-            .map_err(|e| Error::FromCoeff{cause: e.to_string()})?;
+        let mut out = DefConv::<T,U>::one_way(leading.clone())?;
         for coeff in coeffs.rev() {
             out *= x.clone();
-            out += coeff.clone().approx_into()
-                .map_err(|e| Error::FromCoeff{cause: e.to_string()})?;
+            out += DefConv::<T,U>::one_way(coeff.clone())?;
         }
         Ok(out)
     } else {
