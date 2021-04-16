@@ -30,17 +30,14 @@ assert_eq!(h, ClassicalPoly::new(vec![4., 2., 3., -1.]));
 Single-point and multi-point evaluation work as follows.
 
 ```rust
-let h = ClassicalPoly::<f32>::new(vec![4., 2., 3., -1.]);
-assert_eq!(h.eval(&0.), 4.);
-assert_eq!(h.eval(&1.), 8.);
-assert_eq!(h.eval(&-1.), 6.);
-assert_eq!(h.mp_eval([0.,1.,-1.].iter()), [4.,8.,6.]);
+type CP = ClassicalPoly<f32>;
+let h = CP::new(vec![4., 2., 3., -1.]);
+assert_eq!(h.eval(&0.), Ok(4.));
+assert_eq!(h.eval(&1.), Ok(8.));
+assert_eq!(h.eval(&-1.), Ok(6.));
+let eval_info = CP::mp_eval_prep([0., 1., -1.].iter().copied());
+assert_eq!(h.mp_eval(&eval_info).unwrap(), [4.,8.,6.]);
 ```
-
-If the same evaluation points are used for multiple polynomials,
-they can be preprocessed with [`Poly::mp_eval_prep()`], and then
-replacing [`Poly::mp_eval()`] with [`Poly::mp_eval_post()`] will
-be more efficient overall.
 
 ## Sparse interpolation
 
@@ -60,20 +57,16 @@ pairs, sorted by exponent, corresponding to the nonzero terms of the
 evaluated polynomial.
 
 ```rust
-let f = ClassicalPoly::new(vec![0., -2.5, 0., 0., 0., 7.1]);
+type CP = ClassicalPoly<f64>;
+let f = CP::new(vec![0., -2.5, 0., 0., 0., 7.1]);
 let t = 2;
-let theta = 1.8f64;
-let eval_pts = [1., theta, theta.powi(2), theta.powi(3)];
-let evals = f.mp_eval(eval_pts.iter());
-let error = 0.001;
-let mut result = ClassicalPoly::sparse_interp(
-    &theta,    // evaluation base point
-    t,         // upper bound on nonzero terms
-    0..8,      // iteration over possible exponents
-    &evals,    // evaluations at powers of theta
-    &RelativeParams::<f64>::new(Some(error), Some(error))
-               // needed for approximate types like f64
-).unwrap();
+let (eval_info, interp_info) = ClassicalPoly::sparse_interp_prep(
+    t,          // upper bound on nonzero terms
+    0..8,       // iteration over possible exponents
+    &f64::MAX,  // upper bound on coefficient magnitude
+);
+let evals = f.mp_eval(&eval_info).unwrap();
+let mut result = CP::sparse_interp(&evals, &interp_info).unwrap();
 
 // round the coefficients to nearest 0.1
 for (_,c) in result.iter_mut() {
@@ -83,7 +76,7 @@ for (_,c) in result.iter_mut() {
 assert_eq!(result, [(1, -2.5), (5, 7.1)]);
 ```
 
-Current version: 0.0.2
+Current version: 0.0.3
 
 ## License
 
