@@ -132,6 +132,7 @@ custom_error!{
         CoeffConv{cause: String}
             = "Could not convert coefficient: {cause}",
         Singular = "Encountered singular matrix when expecting nonsingular; perhaps sparsity was set too low",
+        SparsityTooLow = "Sparsity bound set too low in sparse interpolation",
         MissingExponents = "The exponent of a non-zero term was missing from the list",
 }
 
@@ -697,7 +698,7 @@ where C: Clone,
     fn post(out: &mut impl Extend<Self::Eval>, coeffs: &[Self::Coeff], info: &Self::EvalInfo) -> Result<()> {
         //out.extend(coeffs.iter().zip(info.iter()).map(|(c,x)| { let mut out = x.clone(); out *= c; out }));
 		ErrorIter::new(info.iter().map(|x| horner_eval(coeffs.iter(), x)))
-            .map(|evals| out.extend(evals))
+            .try_use(|evals| out.extend(evals))
         //out.extend(info.iter().map(|x| horner_eval(coeffs.iter(), x)));
     }
 }
@@ -714,11 +715,6 @@ where C: Clone,
 ///     root finding, with complexity O(sparsity^3).
 #[derive(Debug,Default,Clone,Copy,PartialEq,Eq)]
 pub struct ClassicalTraits<C>(PhantomData<C>);
-
-// FIXME remove
-fn at_a_loss(x: &Vec<Complex64>, y: &Complex64) -> Result<Complex64> {
-    horner_eval(x.iter(), y)
-}
 
 impl<C> PolyTraits for ClassicalTraits<C>
 where C: Clone + Mul<Output=C> + AddAssign,
@@ -744,8 +740,9 @@ where C: Clone + Mul<Output=C> + AddAssign,
         for (ref expon, ref mut power) in theta_pows.iter_mut() {
             *power = theta.powu(*expon as u32);
         }
+        //TODO work out precise bounds to use for RelativeParams here
         (EvalTrait::<Self, Complex64>::prep((0..2*sparsity).map(|e| theta.powu(e as u32))),
-         (sparsity, theta_pows, RelativeParams::<Complex64,f64>::new(Some(1e-10), Some(1e-10))) //TODO how to choose approx params
+         (sparsity, theta_pows, RelativeParams::<Complex64,f64>::new(Some(1e-8), Some(1e-8)))
         )
     }
 
@@ -760,9 +757,9 @@ where C: Clone + Mul<Output=C> + AddAssign,
         lambda.push(Complex64::from(-1.));
         let (degs, roots): (Vec<usize>, Vec<Complex64>) = pows.iter().filter_map(
             |(deg, rootpow)| {
-            // FIXME why helper function is needed?
+            // TODO I have no idea why this helper function is needed instead of the line below.
             //horner_eval(lambda.iter(), rootpow).ok().and_then(
-            at_a_loss(&lambda, rootpow).ok().and_then(
+            classical_sparse_interp_helper(&lambda, rootpow).ok().and_then(
                 |eval| match close.close_to_zero(&eval) {
                     true => Some((deg, rootpow)),
                     false => None,
@@ -773,12 +770,18 @@ where C: Clone + Mul<Output=C> + AddAssign,
             Err(Error::MissingExponents)
         } else {
             let evslice = &evals[..degs.len()];
-            Ok(degs.into_iter().zip(
+            ErrorIter::new(
                 bad_trans_vand_solve(&roots, evslice, close)?.into_iter()
-                    .map(|c| DefConv::<C,Complex64>::other_way(c).unwrap()) // FIXME avoid unwrap
-            ).collect())
+                    .map(|c| DefConv::<C,Complex64>::other_way(c))
+            ).try_use(|it| degs.into_iter().zip(it).collect())
         }
     }
+}
+
+// TODO helper function because for some reason I could not get this
+// to compile otherwise.
+fn classical_sparse_interp_helper(x: &Vec<Complex64>, y: &Complex64) -> Result<Complex64> {
+    horner_eval(x.iter(), y)
 }
 
 /// Generic struct to hold a polynomial and traits for operations.
@@ -1167,10 +1170,11 @@ where T: Clone + Mul<Output=T> + AddAssign,
     }
 }
 
-fn horner_eval<'a,'b,T,U>(mut coeffs: impl DoubleEndedIterator<Item=&'a T>, x: &'b U)
+fn horner_eval<'a,'b,T,U,I>(mut coeffs: I, x: &'b U)
     -> Result<U>
 where T: 'a + Clone,
       U: Clone + Zero + MulAssign + AddAssign,
+      I: DoubleEndedIterator<Item=&'a T>,
       DefConv<T,U>: OneWay<Source=T, Dest=U>,
 {
     if let Some(leading) = coeffs.next_back() {
@@ -1313,10 +1317,16 @@ where T: Clone + One + Mul<Output=T> + SubAssign + MulAssign + Inv<Output=T>,
 {
     assert_eq!(seq.len() % 2, 0);
     let n = seq.len() / 2;
-    bad_linear_solve(
-        (0..n).map(|i| &seq[i..i+n]),
-        &seq[n..2*n],
-        close)
+    for k in (1..=n).rev() {
+        if let Ok(res) = bad_linear_solve(
+            (0..k).map(|i| &seq[i..i+k]),
+            &seq[k..2*k],
+            close)
+        {
+            return Ok(res);
+        }
+    }
+    Err(Error::SparsityTooLow)
 }
 
 fn bad_trans_vand_solve<'a,'b,T,U>(
@@ -1374,7 +1384,7 @@ impl<I,E> ErrorIter<I,E> {
         }
     }
 
-    fn map<F,T>(mut self, f: F) -> core::result::Result<T,E>
+    fn try_use<F,T>(mut self, f: F) -> core::result::Result<T,E>
     where F: FnOnce(&mut Self) -> T
     {
         let x = f(&mut self);
@@ -1488,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn classical_sparse_interp() {
+    fn classical_sparse_interp_exact() {
         type CP = ClassicalPoly<i32>;
         let f = CP::new(vec![3, 0, -2, 0, 0, 0, -1]);
         let t = 3;
@@ -1497,5 +1507,47 @@ mod tests {
         let expected_sparse: Vec<_> = f.rep.iter().enumerate().filter(|(_,c)| **c != 0).map(|(e,c)| (e,*c)).collect();
         let sparse_f = CP::sparse_interp(&evals, &interp_info).unwrap();
         assert_eq!(expected_sparse, sparse_f);
+    }
+
+    #[test]
+    fn classical_sparse_interp_overshoot() {
+        type CP = ClassicalPoly<i32>;
+        let f = CP::new(vec![3, 0, -2, 0, 0, 0, -1]);
+        let t = 5;
+        let (eval_info, interp_info) = CP::sparse_interp_prep(t, 0..10, &100);
+        let evals = f.mp_eval(&eval_info).unwrap();
+        let expected_sparse: Vec<_> = f.rep.iter().enumerate().filter(|(_,c)| **c != 0).map(|(e,c)| (e,*c)).collect();
+        let sparse_f = CP::sparse_interp(&evals, &interp_info).unwrap();
+        assert_eq!(expected_sparse, sparse_f);
+    }
+
+    #[test]
+    fn classical_spinterp_big() {
+        type CP = ClassicalPoly<f64>;
+        let mut coeffs = vec![0.0f64; 200];
+        let expected_sparse: Vec<(usize, f64)> = vec![
+            (3, 1.9),
+            (4, -3.),
+            (31, 18.),
+            (101, 19.4),
+            (108, 0.5),
+            (109, 0.6),
+            (110, -1.),
+            (151, -12.6),
+            (199, 2.5),
+        ];
+        for (e, c) in expected_sparse.iter() {
+            coeffs[*e] = *c;
+        }
+        let f = CP::new(coeffs.clone());
+        let (eval_info, interp_info) = CP::sparse_interp_prep(15, 0..200, &20000.);
+        let evals = f.mp_eval(&eval_info).unwrap();
+        let (computed_expons, computed_coeffs): (Vec<_>, Vec<_>)
+            = CP::sparse_interp(&evals, &interp_info).unwrap().into_iter().unzip();
+        let (expected_expons, expected_coeffs): (Vec<_>, Vec<_>)
+            = expected_sparse.into_iter().unzip();
+        assert_eq!(expected_expons, computed_expons);
+        let close = RelativeParams::<f64>::new(Some(0.001), Some(0.001));
+        assert!(close.close_to_iter(expected_coeffs.iter(), computed_coeffs.iter()));
     }
 }
