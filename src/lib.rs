@@ -123,6 +123,10 @@ use num_complex::{
     Complex64,
 };
 use custom_error::custom_error;
+use rand::{
+    Rng,
+    thread_rng,
+};
 
 custom_error!{
     /// Errors that arise in polynomial arithmetic or sparse interpolation.
@@ -733,16 +737,13 @@ where C: Clone + Mul<Output=C> + AddAssign,
         -> (<Self::SparseInterpEval as EvalTypes>::EvalInfo, Self::SparseInterpInfo)
     {
         let mut theta_pows: Vec<_> = expons.map(|d| (d, Complex64::default())).collect();
-        let theta = match theta_pows.iter().map(|pair| pair.0).max() {
-            Some(max_pow) => Complex64::from_polar(1., 2.*core::f64::consts::PI / (max_pow as f64 + 1.)),
-            None => Complex64::default(),
-        };
+        let theta = Complex64::from_polar(1., thread_rng().gen_range(0f64, 1f64) * core::f64::consts::PI);
         for (ref expon, ref mut power) in theta_pows.iter_mut() {
             *power = theta.powu(*expon as u32);
         }
         //TODO work out precise bounds to use for RelativeParams here
         (EvalTrait::<Self, Complex64>::prep((0..2*sparsity).map(|e| theta.powu(e as u32))),
-         (sparsity, theta_pows, RelativeParams::<Complex64,f64>::new(Some(1e-8), Some(1e-8)))
+         (sparsity, theta_pows, RelativeParams::<Complex64,f64>::new(Some(1e-4), Some(1e-4)))
         )
     }
 
@@ -766,7 +767,7 @@ where C: Clone + Mul<Output=C> + AddAssign,
                 }
             )}
         ).unzip();
-        if degs.len() != lambda.len() - 1 {
+        if degs.len() > lambda.len() - 1 {
             Err(Error::MissingExponents)
         } else {
             let evslice = &evals[..degs.len()];
